@@ -1,0 +1,14 @@
+# Dependencias do agente, separadas das da API industrial.
+#
+# `make deps` recria api/.venv a partir de api/pyproject.toml, que e material
+# da TRACTIAN e nao deve ser editado. Instalar as deps do agente de forma
+# imperativa nao sobrevive a essa recriacao, entao ficam declaradas aqui.
+#
+#   uv pip install --python api/.venv/bin/python -r agent/requirements.txt
+#
+# httpx, pydantic e fastapi ja vem das deps da API.
+
+mcp>=2.1.0
+
+# Desenvolvimento
+mypy>=1.11
