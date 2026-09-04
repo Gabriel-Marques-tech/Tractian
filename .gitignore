@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+api/.venv/
+
+# Runtime (make up)
+.run/
+
+# Secrets
+agent/.env
+.env
+
+# Resíduo do zip entregue pela Tractian (macOS)
+inteli-tractian-project(2)/
+
+# Traces e resultados de experimento (grandes, regeneráveis)
+runs/*.jsonl
