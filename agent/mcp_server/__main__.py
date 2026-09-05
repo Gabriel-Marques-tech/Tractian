@@ -1,7 +1,6 @@
 """Ponto de entrada: `python -m agent.mcp_server`."""
 
-from agent.mcp_server.server import register_tools, server
+from agent.mcp_server.server import from_environment
 
 if __name__ == "__main__":
-    register_tools(server)
-    server.run("stdio")
+    from_environment().run("stdio")
