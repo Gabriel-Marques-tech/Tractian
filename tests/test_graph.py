@@ -12,7 +12,7 @@ import pytest
 
 from agent.graph import run_case_graph
 from agent.llm import Completion, ToolRequest
-from agent.trace import Arm, RunConfig, StopReason
+from agent.trace import Arm, RunConfig, StopReason, Trace
 
 from conftest import API_BASE_URL, requires_api
 
@@ -41,10 +41,18 @@ class RoleAwareModel:
         self.tools_to_call = list(tools_to_call)
 
     async def chat(self, messages, tools=None) -> Completion:
-        if not tools:
+        if tools is None and not self.plan_calls:
             self.plan_calls += 1
             return Completion(content="1. checar RMS\n2. checar baseline",
                               prompt_tokens=10, completion_tokens=5)
+
+        if tools is None and self.plan_calls:
+            # Sem ferramentas e ja houve plano: e o organizador concluindo.
+            return Completion(
+                content="DESCARTADO: espectro veio inconclusive.\n"
+                        "RESPOSTA: RMS acima do limiar, baseline estabelecido.",
+                prompt_tokens=10, completion_tokens=5,
+            )
 
         if self.tool_turns < len(self.tools_to_call):
             nome = self.tools_to_call[self.tool_turns]
@@ -93,7 +101,8 @@ async def test_o_planejador_roda_uma_vez_antes_das_ferramentas():
     trace = await run_case_graph(CASE, config(), client=modelo)
 
     assert modelo.plan_calls == 1
-    assert trace.model_calls == modelo.plan_calls + modelo.tool_turns + 1
+    # planejador + turnos de ferramenta + turno que encerra a coleta + organizador
+    assert trace.model_calls == modelo.plan_calls + modelo.tool_turns + 2
 
 
 async def test_trace_registra_o_papel_que_originou_cada_chamada():
@@ -159,3 +168,61 @@ async def test_falha_do_modelo_vira_stop_reason_e_nao_excecao():
 
     assert trace.stop_reason is StopReason.ERROR
     assert "ollama HTTP 500" in (trace.error or "")
+
+
+# --- issue #8: organizador de evidencias --------------------------------------
+
+
+async def test_organizador_escreve_a_resposta_final():
+    """Quem conclui nao e quem coleta. Separar as duas coisas e a razao de o
+    braco B existir."""
+    trace = await run_case_graph(
+        CASE, config(), client=RoleAwareModel("get_rms", "get_baseline")
+    )
+
+    assert trace.stop_reason is StopReason.ANSWERED
+    assert "RMS acima do limiar" in (trace.final_answer or "")
+    assert "DESCARTADO" not in (trace.final_answer or "")
+
+
+async def test_o_que_foi_descartado_fica_registrado_no_trace():
+    trace = await run_case_graph(CASE, config(), client=RoleAwareModel("get_rms"))
+
+    assert "espectro veio inconclusive" in trace.role_notes["organizador"]
+
+
+async def test_braco_A_nao_tem_deliberacao_a_inspecionar():
+    """`role_notes` vazio no braco A e a diferenca que o relatorio mostra."""
+    from agent.react import run_case
+    from agent.llm import Completion as C
+
+    class Simples:
+        async def chat(self, messages, tools=None):
+            return C(content="resposta direta")
+
+    trace = await run_case(CASE, config(arm=Arm.BASELINE), client=Simples())
+
+    assert trace.role_notes == {}
+
+
+async def test_digest_de_evidencia_marca_o_mode_de_cada_consulta():
+    """O organizador precisa ver `mode` por consulta: e o que distingue
+    evidencia que sustenta de evidencia que nao sustenta."""
+    from agent.graph import _evidence_digest
+    from agent.trace import Mode, ToolCall
+
+    trace = Trace(case_id="c", config=config())
+    for modo, passo in ((Mode.COMPLETE, "/a/rms"), (Mode.CONFLICT, "/a/analyses")):
+        trace.record(ToolCall(step=0, tool="t", http_method="GET",
+                              http_path=passo, mode=modo))
+
+    digest = _evidence_digest(trace)
+
+    assert "[complete]" in digest
+    assert "[conflict]" in digest
+
+
+async def test_digest_sem_consulta_nao_quebra():
+    from agent.graph import _evidence_digest
+
+    assert "nenhuma consulta" in _evidence_digest(Trace(case_id="c", config=config()))
