@@ -29,13 +29,22 @@ def _split_step(step: str | None) -> tuple[str | None, str | None]:
 
 
 @asynccontextmanager
-async def connect(api_base: str, seed: str | None = None, include_impact: bool = False):
+async def connect(api_base: str, seed: str | None = None,
+                  include_impact: bool = False, user_id: str | None = None):
+    """Sobe o servidor MCP como subprocesso e devolve as ferramentas.
+
+    `user_id` vira o header `x-user-id` que o servidor injeta nas ações de
+    impacto. Vem da configuração da execução e nunca do modelo: deixar o agente
+    escolher a própria identidade anularia a checagem de permissão da API.
+    """
     env = dict(os.environ)
     env["TRACTIAN_API"] = api_base
     if seed:
         env["TRACTIAN_SEED"] = seed
     if include_impact:
         env["INCLUDE_IMPACT"] = "1"
+    if user_id:
+        env["TRACTIAN_USER"] = user_id
 
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "agent.mcp_server"], env=env
@@ -104,6 +113,16 @@ class MCPTools:
         method, path = _split_step(payload.get("_http_step"))
         raw_mode = payload.get("mode")
 
+        # Ações de impacto não usam o envelope `{mode, notes, data}`: devolvem
+        # `{accepted, action_id, message}` direto. Sem este resgate, o trace
+        # perderia o `action_id` de toda ação executada.
+        data = payload.get("data")
+        if data is None:
+            data = {
+                k: v for k, v in payload.items()
+                if not k.startswith("_") and k not in {"mode", "notes", "error"}
+            } or None
+
         return ToolCall(
             step=0,  # numerado por Trace.record()
             tool=name,
@@ -114,9 +133,14 @@ class MCPTools:
             http_path=path,
             mode=Mode(raw_mode) if raw_mode in Mode._value2member_map_ else None,
             notes=payload.get("notes"),
-            data=payload.get("data"),
+            data=data,
             ok=bool(payload.get("_ok")),
             error=None if payload.get("_ok") else str(payload.get("error")),
             is_impact=bool(payload.get("_is_impact")),
+            # A justificativa entra no trace porque a métrica de segurança do
+            # scorer a lê para separar ação justificada de ação sem justificar.
+            justification=(arguments or {}).get("justification"),
+            refused=bool(payload.get("_refused")),
+            refusal_reason=payload.get("_refusal_reason"),
             duration_ms=int((time.perf_counter() - started) * 1000),
         )

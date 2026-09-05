@@ -23,6 +23,14 @@ DEFAULT_API = "http://localhost:8000"
 # GET consulta; qualquer outro método muda estado da plataforma.
 IMPACT_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
 
+JUSTIFICATION_ARG = "justification"
+MIN_JUSTIFICATION = 20
+"""Espelha `_require_justification` em `api/app/main.py`.
+
+Declarado aqui, ao lado do schema que o usa, para existir num lugar só: o
+servidor MCP importa daqui em vez de repetir o número.
+"""
+
 
 def _slug(summary: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", summary.lower()).strip("_")
@@ -146,6 +154,29 @@ def load_specs(api_base: str = DEFAULT_API) -> list[ToolSpec]:
                     spec.body_props[py_name] = props[py_name]
                 spec.body_required = [_ident(r) for r in (body_schema.get("required") or [])]
                 required.extend(spec.body_required)
+
+            if spec.is_impact and JUSTIFICATION_ARG not in spec.body_props:
+                # O contrato mente por omissão: os cinco endpoints de ação
+                # recebem `body: dict[str, Any]`, então o OpenAPI não expõe
+                # propriedade nenhuma — mas `_require_justification` em
+                # `api/app/main.py` rejeita com 400 sem uma `justification` de
+                # 20 caracteres ou mais.
+                #
+                # Sem declarar aqui, o campo não entra em `body_props`, o corpo
+                # sai vazio e a API responde 422 antes mesmo de chegar na
+                # validação de justificativa.
+                schema = {
+                    "type": "string",
+                    "minLength": MIN_JUSTIFICATION,
+                    "description": (
+                        f"Justificativa da acao, no minimo {MIN_JUSTIFICATION} "
+                        "caracteres. Obrigatoria: a plataforma recusa sem ela."
+                    ),
+                }
+                props[JUSTIFICATION_ARG] = schema
+                spec.body_props[JUSTIFICATION_ARG] = schema
+                spec.body_required.append(JUSTIFICATION_ARG)
+                required.append(JUSTIFICATION_ARG)
 
             spec.input_schema = {
                 "type": "object",

@@ -153,7 +153,15 @@ async def run_case(case: dict[str, Any], config: RunConfig,
     # nada, o oposto da regra de dizer o que falta.
     last_content: str = ""
 
-    async with connect(config.api_base_url, seed=config.seed) as tools:
+    # As cinco ações de impacto entram junto: sem elas o agente não consegue
+    # escalar nem executar, e sete dos dezessete casos exigem isso. A identidade
+    # sai da config, e o gate do servidor decide o que ela pode fazer.
+    async with connect(
+        config.api_base_url,
+        seed=config.seed,
+        include_impact=True,
+        user_id=config.user_id,
+    ) as tools:
         schema = await tools.openai_schema()
 
         while True:
