@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterable
 
 from agent.react import run_case
 from agent.scorer import Scores, score
-from agent.trace import RunConfig, Trace
+from agent.trace import Arm, RunConfig, Trace
 
 Run = tuple[str, int]
 """Uma execução: `(case_id, repeticao)`. A unidade de retomada."""
@@ -83,6 +83,16 @@ class BatchSummary:
         return self.wall_seconds / self.executed if self.executed else 0.0
 
 
+def _runner_for(arm: Arm):
+    """Escolhe o executor do braço. Import tardio: o braço B carrega LangGraph,
+    e quem roda só o braço A não deve pagar por isso."""
+    if arm is Arm.MULTI_AGENT:
+        from agent.graph import run_case_graph
+
+        return run_case_graph
+    return run_case
+
+
 async def run_batch(
     config: RunConfig,
     cases: list[dict[str, Any]],
@@ -118,7 +128,10 @@ async def run_batch(
         # que vai para o trace e é dela que a retomada lê o que já rodou.
         run_config = config.model_copy(update={"repetition": repetition})
 
-        trace = await run_case(case, run_config, client=client)
+        # O braço é a variável do experimento; tudo o mais na config é
+        # idêntico, e é o que torna a comparação honesta.
+        executar = _runner_for(run_config.arm)
+        trace = await executar(case, run_config, client=client)
         resultado = score(trace, expected_paths.get(case.get("ticket_id", ""), []))
 
         # O score vai primeiro, o trace por último. O trace é a chave de
