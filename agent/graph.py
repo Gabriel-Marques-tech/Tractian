@@ -18,8 +18,8 @@ longos estouraria esse teto em todo nó.
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -71,6 +71,57 @@ afirmacao. Se a evidencia nao bastar, diga o que falta.
 """
 
 
+DECIDER_PROMPT = """Voce decide o que vai para o cliente no suporte da TRACTIAN.
+
+Recebe a resposta redigida e a critica de um revisor de outra area.
+
+Escolha uma das tres e escreva na primeira linha:
+ESCOLHA: RESPOSTA | CRITICA | SOMA
+
+- RESPOSTA: a critica nao procede ou nao muda nada
+- CRITICA: a critica derruba a resposta; o cliente precisa saber disso
+- SOMA: as duas se completam
+
+Na segunda linha escreva "MOTIVO:" e uma frase.
+Depois escreva "FINAL:" e o texto que vai ao cliente, em portugues.
+"""
+
+ADVERSARIAL_PROMPT = """Voce revisa respostas de suporte industrial da TRACTIAN
+assumindo a persona de {persona}.
+
+Recebe a evidencia coletada e a resposta redigida. Seu trabalho e apontar o que
+a investigacao NAO viu, do ponto de vista da sua area. Nao reescreva a
+resposta.
+
+Escreva no maximo tres linhas, cada uma comecando com "-". Se a resposta estiver
+solida do seu ponto de vista, escreva apenas "SEM RESSALVAS".
+"""
+
+PERSONAS = [
+    "um engenheiro de confiabilidade, que desconfia de conclusao sem baseline",
+    "um tecnico de campo, que sabe que sensor offline esconde problema",
+    "um analista de dados, que cobra frescor e completude antes de inferir",
+]
+"""Personas de outras areas do time.
+
+Fixas e ordenadas: a persona precisa ser a mesma entre execucoes do mesmo caso,
+senao ela viraria mais uma fonte de variancia dentro do braco B e sujaria a
+comparacao com o braco A.
+"""
+
+
+def _persona_for(trace: Trace, instance: int = 0) -> str:
+    """Persona estável por caso, e estável entre processos.
+
+    `hash()` de string é salgado por processo em Python, então usá-lo faria a
+    persona mudar a cada execução — virando exatamente a fonte de variância
+    que escolher persona fixa existe para evitar. `sha256` é o mesmo recurso
+    que `api/app/prob.py` usa para ser determinístico.
+    """
+    digest = hashlib.sha256(trace.case_id.encode()).hexdigest()
+    return PERSONAS[(int(digest[:8], 16) + instance) % len(PERSONAS)]
+
+
 def _evidence_digest(trace: Trace) -> str:
     """Resumo compacto do que foi coletado, para o organizador.
 
@@ -92,6 +143,30 @@ def _evidence_digest(trace: Trace) -> str:
     return "\n".join(linhas)
 
 
+def _split_decider(texto: str) -> tuple[str, str, str]:
+    """Separa escolha, motivo e o texto que vai ao cliente."""
+    escolha = motivo = final = ""
+    resto = texto
+    alto = resto.upper()
+
+    corte = alto.find("FINAL:")
+    if corte != -1:
+        final = resto[corte + len("FINAL:"):].strip()
+        resto, alto = resto[:corte], alto[:corte]
+
+    corte = alto.find("MOTIVO:")
+    if corte != -1:
+        motivo = resto[corte + len("MOTIVO:"):].strip()
+        resto, alto = resto[:corte], alto[:corte]
+
+    corte = alto.find("ESCOLHA:")
+    if corte != -1:
+        escolha = resto[corte + len("ESCOLHA:"):].strip().split()[0].upper() \
+            if resto[corte + len("ESCOLHA:"):].strip() else ""
+
+    return escolha or "RESPOSTA", motivo, final
+
+
 def _split_organizer(texto: str) -> tuple[str, str]:
     """Separa o que foi descartado da resposta ao cliente."""
     alto = texto.upper()
@@ -110,6 +185,8 @@ class GraphState(TypedDict, total=False):
     messages: list[dict[str, Any]]
     trace: Trace
     finished: bool
+    draft: str
+    critique: str
 
 
 def _case_brief(case: dict[str, Any]) -> str:
@@ -250,7 +327,66 @@ async def run_case_graph(case: dict[str, Any], config: RunConfig,
             if verbose:
                 print(f"  [organizador] descartou: {descartado[:80] or '(nada)'}")
 
-            trace.finish(StopReason.ANSWERED, final or (resposta.content or ""))
+            return {"draft": final or (resposta.content or "")}
+
+        async def adversarial(state: GraphState) -> GraphState:
+            """Olha a resposta por outros olhos e aponta o que ficou de fora.
+
+            Sem ferramentas: a critica tem que sair da evidencia ja coletada.
+            Dar ferramenta a este papel o transformaria num segundo coletor, e
+            o que se quer dele e a leitura, nao mais dados.
+            """
+            persona = _persona_for(trace)
+            resposta = await client.chat(
+                [
+                    {"role": "system",
+                     "content": ADVERSARIAL_PROMPT.format(persona=persona)},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"EVIDENCIA:\n{_evidence_digest(trace)}\n\n"
+                            f"RESPOSTA REDIGIDA:\n{state.get('draft', '')}"
+                        ),
+                    },
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            critica = (resposta.content or "").strip()
+            trace.role_notes["adversarial"] = f"[{persona}] {critica}"
+            if verbose:
+                print(f"  [adversarial] {critica[:100]}")
+
+            return {"critique": critica}
+
+        async def decisor(state: GraphState) -> GraphState:
+            """Escolhe o que vai ao cliente e registra o motivo."""
+            resposta = await client.chat(
+                [
+                    {"role": "system", "content": DECIDER_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"RESPOSTA REDIGIDA:\n{state.get('draft', '')}\n\n"
+                            f"CRITICA DO REVISOR:\n{state.get('critique', '')}"
+                        ),
+                    },
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            escolha, motivo, final = _split_decider(resposta.content or "")
+            trace.role_notes["decisor"] = f"{escolha}: {motivo}"
+            if verbose:
+                print(f"  [decisor] {escolha} — {motivo[:80]}")
+
+            # Sem texto final utilizavel, o rascunho do organizador prevalece:
+            # entregar vazio ao cliente seria pior que entregar o rascunho.
+            trace.finish(StopReason.ANSWERED, final or state.get("draft", ""))
             return {"finished": True}
 
         def executor(state: GraphState) -> str:
@@ -269,13 +405,17 @@ async def run_case_graph(case: dict[str, Any], config: RunConfig,
         grafo.add_node("planejador", planejador)
         grafo.add_node("orquestrador", orquestrador)
         grafo.add_node("organizador", organizador)
+        grafo.add_node("adversarial", adversarial)
+        grafo.add_node("decisor", decisor)
         grafo.add_edge(START, "planejador")
         grafo.add_edge("planejador", "orquestrador")
         grafo.add_conditional_edges(
             "orquestrador", executor,
             {"orquestrador": "orquestrador", "organizador": "organizador", END: END},
         )
-        grafo.add_edge("organizador", END)
+        grafo.add_edge("organizador", "adversarial")
+        grafo.add_edge("adversarial", "decisor")
+        grafo.add_edge("decisor", END)
 
         try:
             await grafo.compile().ainvoke(
