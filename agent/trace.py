@@ -92,6 +92,15 @@ class ToolCall(BaseModel):
     refused: bool = False
     refusal_reason: str | None = None
 
+    recovered_from_text: bool = False
+    """A chamada foi resgatada de texto em prosa, não emitida como `tool_calls`.
+
+    Modelo pequeno com muitas ferramentas escreve a chamada no corpo da
+    resposta. O cliente resgata para que a métrica meça o raciocínio do agente
+    e não a formatação do modelo; o campo mantém isso auditável, e a taxa de
+    resgate vira medida de robustez em vez de detalhe escondido.
+    """
+
     started_at: datetime = Field(default_factory=_now)
     duration_ms: int = 0
 

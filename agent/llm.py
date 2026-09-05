@@ -30,6 +30,13 @@ class ToolRequest:
     id: str
     name: str
     arguments: dict[str, Any]
+    recovered: bool = False
+    """Veio de texto em prosa, não do campo `tool_calls`.
+
+    Marcado para que a taxa de resgate seja reportável em vez de escondida:
+    "quantas chamadas o agente só conseguiu fazer porque o cliente resgatou"
+    é medida de robustez, não detalhe de implementação.
+    """
 
 
 @dataclass
@@ -50,6 +57,64 @@ def _as_dict(raw: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+_CALL_KEYS = {"name", "arguments"}
+
+
+def recover_tool_calls(content: str | None,
+                       valid_names: list[str]) -> list[ToolRequest]:
+    """Extrai chamadas que o modelo escreveu como texto em vez de emitir.
+
+    Medido: `qwen2.5:1.5b` com 18 ferramentas escreve
+    `{"name": "get_rms", "arguments": {...}}` no corpo da resposta. A escolha
+    de ferramenta está correta; o que falha é o protocolo. Descartar isso
+    mediria a formatação do modelo em vez do raciocínio do agente.
+
+    Só resgata nome que existe entre as ferramentas expostas. Sem essa trava,
+    qualquer JSON em prosa viraria chamada.
+    """
+    if not content:
+        return []
+
+    permitidos = set(valid_names)
+    encontrados: list[ToolRequest] = []
+
+    # Varredura por chaves balanceadas: `json.JSONDecoder.raw_decode` a partir
+    # de cada `{` encontra objetos embutidos em prosa e em bloco de código sem
+    # precisar de expressão regular para JSON aninhado.
+    decoder = json.JSONDecoder()
+    posicao = 0
+    while True:
+        inicio = content.find("{", posicao)
+        if inicio == -1:
+            break
+        try:
+            objeto, fim = decoder.raw_decode(content, inicio)
+        except json.JSONDecodeError:
+            posicao = inicio + 1
+            continue
+        posicao = fim
+
+        if not isinstance(objeto, dict) or not _CALL_KEYS <= objeto.keys():
+            continue
+        nome = objeto.get("name")
+        if nome not in permitidos:
+            continue
+
+        argumentos = _as_dict(objeto.get("arguments"))
+        encontrados.append(
+            ToolRequest(
+                id=f"recovered_{len(encontrados)}",
+                name=nome,
+                # O modelo preenche opcionais com null; o servidor não deve
+                # recebê-los como se tivessem sido informados.
+                arguments={k: v for k, v in argumentos.items() if v is not None},
+                recovered=True,
+            )
+        )
+
+    return encontrados
 
 
 def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -113,8 +178,22 @@ class LLMClient:
     async def chat(self, messages: list[dict[str, Any]],
                    tools: list[dict[str, Any]] | None = None) -> Completion:
         if self.backend == "ollama":
-            return await self._ollama(messages, tools)
-        return await self._openai(messages, tools)
+            resposta = await self._ollama(messages, tools)
+        else:
+            resposta = await self._openai(messages, tools)
+
+        # Resgate só quando o campo estruturado veio vazio: se o modelo emitiu
+        # `tool_calls` corretamente, não há nada a recuperar e mexer no texto
+        # só criaria chamada duplicada.
+        if not resposta.tool_calls and tools:
+            nomes = [t.get("function", {}).get("name", "") for t in tools]
+            recuperadas = recover_tool_calls(resposta.content, nomes)
+            if recuperadas:
+                resposta.tool_calls = recuperadas
+                # O texto era a chamada, não resposta ao cliente. Mantê-lo
+                # faria o JSON cru vazar para o histórico e para o relatório.
+                resposta.content = ""
+        return resposta
 
     async def _ollama(self, messages, tools) -> Completion:
         payload: dict[str, Any] = {

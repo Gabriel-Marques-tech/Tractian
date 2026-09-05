@@ -19,27 +19,38 @@ from agent.trace import Arm, RunConfig, StopReason, Trace
 
 SYSTEM_PROMPT = """Voce e um agente de suporte tecnico industrial da TRACTIAN.
 
-Recebe a solicitacao de uma pessoa que opera uma planta e investiga usando as
-ferramentas disponiveis, que consultam a plataforma real.
+Investiga chamados usando as ferramentas, que consultam a plataforma real.
 
-REGRAS:
+1. Chame a ferramenta de verdade. Nunca escreva a chamada como texto.
+2. Uma consulta so raramente basta. O cadastro do ativo nao explica falha.
+3. Toda leitura traz `mode`: complete, partial, inconclusive, conflict,
+   unavailable. Ausencia de dado NAO e ausencia de problema.
+4. Fundamente cada afirmacao no dado que voltou. Nao invente.
+5. Decida entre orientar, agir ou escalar.
+6. Responda em portugues, direto.
 
-1. Investigue antes de concluir. NUNCA responda sem antes chamar ferramenta.
-   Chame a ferramenta de verdade: nao escreva a chamada como texto na resposta.
-2. Toda resposta da plataforma vem com um campo `mode`:
-   - complete: dado integro
-   - partial: faltam campos, a conclusao precisa reconhecer isso
-   - inconclusive: o dado nao sustenta conclusao
-   - conflict: fontes discordam, diga isso em vez de escolher uma em silencio
-   - unavailable: o dado nao existe agora
-   Ausencia de dado NAO e ausencia de problema. Sensor offline nao significa
-   maquina saudavel.
-3. Fundamente cada afirmacao no dado que voltou. Nao invente numero, data ou
-   diagnostico.
-4. Quando a evidencia nao bastar, diga o que falta em vez de arriscar.
-5. Responda em portugues, de forma direta, para quem opera a maquina.
+Pare de chamar ferramentas so quando puder citar o dado que sustenta cada
+afirmacao.
 
-Quando tiver evidencia suficiente, responda em texto, sem chamar mais ferramentas.
+O baseline e o estado normal aprendido do ativo: `learning`, `established` ou
+`invalidated`. O limiar de RMS vem dele. Insight ausente pode ser modelo
+atrasado, sem cobertura, ou dado que nao chegou.
+"""
+"""Tamanho do prompt e escolha de ferramenta foram medidos, nao adivinhados.
+
+Contra o caso TKT-INV-05, cujo gabarito comeca em `GET /assets/{id}/rms`:
+
+    596 chars  -> tool call estruturada, ferramenta errada (`get_asset`)
+    797 chars  -> tool call estruturada, ferramenta certa  (`get_rms`)
+    2367 chars -> ferramenta certa, mas emitida como TEXTO
+
+O conteudo de dominio (baseline, limiar, insight ausente) e o que corrige a
+escolha. O excesso de texto e o que quebra a emissao estruturada: acima de
+~2000 tokens de prompt, `qwen2.5:1.5b` volta a escrever a chamada em prosa.
+
+Os conceitos vem de `STUDENT-GUIDE.md` secao 6, que documenta o dominio para
+quem constroi o agente. Nao sao o gabarito: nenhuma sequencia de endpoints e
+mencionada, so o que precisa ser estabelecido para concluir.
 """
 
 
@@ -61,9 +72,18 @@ def _observation(call) -> str:
 def _framing(case: dict[str, Any]) -> str:
     """Enquadra o chamado como tarefa.
 
-    Medido nesta maquina: `qwen2.5:1.5b` responde pergunta com prosa e instrucao
-    com ferramenta. Os chamados chegam como pergunta ("Cade o diagnostico?"),
-    entao o enquadramento e parte do agente, nao maquiagem do benchmark.
+    Medido nesta maquina: `qwen2.5:1.5b` responde pergunta com prosa e
+    instrucao com ferramenta. Os chamados chegam como pergunta ("Cade o
+    diagnostico?"), entao o enquadramento e parte do agente, nao maquiagem do
+    benchmark.
+
+    A versao anterior terminava com "Comece consultando os dados do ativo".
+    O smoke test da issue #6 mostrou que o modelo tratava essa frase como a
+    tarefa inteira: consultava o cadastro, relatava, encerrava. Nove execucoes,
+    uma unica chamada de ferramenta cada, contra gabaritos de quatro passos.
+
+    A instrucao agora nomeia o que precisa ser estabelecido, nao um primeiro
+    passo que possa ser confundido com o unico.
     """
     context = ""
     if case.get("asset_id"):
@@ -76,7 +96,9 @@ def _framing(case: dict[str, Any]) -> str:
     return (
         "Investigue o chamado abaixo usando as ferramentas disponiveis.\n\n"
         f"CHAMADO: {case['message']}{context}\n\n"
-        "Comece consultando os dados do ativo."
+        "Levante a evidencia necessaria antes de responder. Uma consulta so "
+        "raramente basta: cruze as fontes que a pergunta exige e so entao "
+        "conclua, citando o dado que sustenta cada afirmacao."
     )
 
 
