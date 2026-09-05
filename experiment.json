@@ -1,0 +1,13 @@
+{
+  "arm": "A",
+  "model": "qwen2.5:1.5b",
+  "model_base_url": "http://localhost:11434",
+  "api_base_url": "http://localhost:8000",
+  "seed": "exp-2026-09",
+  "user_id": "usr_ana",
+  "max_steps": 10,
+  "max_model_calls": 12,
+  "repetitions": 3,
+  "cases": null,
+  "out_dir": "runs/braco-A"
+}
