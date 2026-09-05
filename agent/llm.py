@@ -98,8 +98,10 @@ class LLMClient:
     """`backend` é inferido da base_url quando não informado."""
 
     def __init__(self, base_url: str, model: str, backend: str | None = None,
-                 temperature: float = 0.0, timeout: float = 300.0) -> None:
+                 temperature: float = 0.0, timeout: float = 900.0,
+                 keep_alive: str = "30m") -> None:
         self.model = model
+        self.keep_alive = keep_alive
         self.temperature = temperature
         self.timeout = timeout
         self.base_url = base_url.rstrip("/")
@@ -120,6 +122,10 @@ class LLMClient:
             "messages": _to_ollama_messages(messages),
             "stream": False,
             "options": {"temperature": self.temperature},
+            # Mantém o modelo residente entre as execuções do batch. Sem isso o
+            # Ollama o descarrega por ociosidade e cada recarga custa dezenas de
+            # segundos — medido: 28s a frio contra 2s com o modelo já carregado.
+            "keep_alive": self.keep_alive,
         }
         if tools:
             payload["tools"] = tools
