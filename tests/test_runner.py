@@ -271,3 +271,14 @@ async def test_queda_entre_as_duas_escritas_nao_perde_o_score(tmp_path: Path, mo
     # Score sobreviveu; trace não. A execução segue pendente e será refeita.
     assert (tmp_path / "scores.jsonl").exists()
     assert completed_runs(tmp_path / "traces.jsonl") == set()
+
+
+async def test_runner_despacha_para_o_braco_certo(tmp_path: Path):
+    """Mesma bateria, mesma seed, mesmos casos: o braço é a unica variavel."""
+    from agent.trace import Arm
+
+    await run_batch(config(arm=Arm.MULTI_AGENT), CASES[:1], GOLD, tmp_path,
+                    repetitions=1, client=ScriptedModel())
+
+    trace = next(iter(Trace.read_jsonl(tmp_path / "traces.jsonl")))
+    assert trace.config.arm is Arm.MULTI_AGENT

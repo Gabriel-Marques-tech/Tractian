@@ -10,5 +10,8 @@
 
 mcp>=2.1.0
 
+# Braço B: grafo de estados dos seis papéis
+langgraph>=1.0
+
 # Desenvolvimento
 mypy>=1.11
