@@ -154,6 +154,15 @@ class Trace(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
+    role_notes: dict[str, str] = Field(default_factory=dict)
+    """Saída de cada papel do braço B, por nome do papel.
+
+    O organizador registra aqui o que descartou e por quê; o revisor
+    adversarial, a crítica; o decisor, o motivo da escolha. No braço A fica
+    vazio, e é justamente essa diferença que o relatório mostra: no braço
+    único não há deliberação a inspecionar.
+    """
+
     started_at: datetime = Field(default_factory=_now)
     finished_at: datetime | None = None
 

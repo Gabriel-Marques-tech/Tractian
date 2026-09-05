@@ -48,9 +48,58 @@ Recebe um plano de investigacao e o que ja foi coletado.
    unavailable. Ausencia de dado NAO e ausencia de problema.
 4. Acao de impacto exige justificativa de 20 caracteres ou mais.
 
-Quando a evidencia do plano estiver coberta, responda ao cliente em portugues,
-citando o dado que sustenta cada afirmacao.
+Quando a evidencia do plano estiver coberta, pare de chamar ferramentas e
+escreva "COLETA CONCLUIDA".
 """
+
+ORGANIZER_PROMPT = """Voce organiza evidencia coletada na plataforma da TRACTIAN
+e escreve a resposta ao cliente.
+
+Recebe o que cada consulta devolveu, com o `mode` de cada uma:
+
+- complete: sustenta conclusao
+- partial: faltam campos, reconheca o que falta
+- inconclusive: NAO sustenta conclusao, diga isso
+- conflict: fontes discordam, diga que discordam em vez de escolher uma
+- unavailable: o dado nao existe agora; ausencia NAO e ausencia de problema
+
+Escreva em duas partes:
+
+DESCARTADO: o que nao sustenta conclusao e por que. Uma linha por item.
+RESPOSTA: a resposta ao cliente em portugues, citando o dado que sustenta cada
+afirmacao. Se a evidencia nao bastar, diga o que falta.
+"""
+
+
+def _evidence_digest(trace: Trace) -> str:
+    """Resumo compacto do que foi coletado, para o organizador.
+
+    Compacto por necessidade: o `data` cru das consultas estoura o teto de
+    prompt em que o modelo abandona o comportamento estruturado.
+    """
+    if not trace.steps:
+        return "(nenhuma consulta retornou dado)"
+
+    linhas = []
+    for c in trace.steps:
+        modo = c.mode.value if c.mode else ("recusado" if c.refused else "erro")
+        detalhe = c.notes or ""
+        if c.ok and isinstance(c.data, dict):
+            campos = ", ".join(f"{k}={v}" for k, v in list(c.data.items())[:6]
+                               if not isinstance(v, (list, dict)))
+            detalhe = f"{detalhe} {campos}".strip()
+        linhas.append(f"- {c.as_path_step()} [{modo}] {detalhe}"[:300])
+    return "\n".join(linhas)
+
+
+def _split_organizer(texto: str) -> tuple[str, str]:
+    """Separa o que foi descartado da resposta ao cliente."""
+    alto = texto.upper()
+    corte = alto.find("RESPOSTA:")
+    if corte == -1:
+        return "", texto.strip()
+    descartado = texto[:corte].replace("DESCARTADO:", "", 1).strip()
+    return descartado, texto[corte + len("RESPOSTA:"):].strip()
 
 
 class GraphState(TypedDict, total=False):
@@ -128,9 +177,11 @@ async def run_case_graph(case: dict[str, Any], config: RunConfig,
             trace.completion_tokens += resposta.completion_tokens or 0
 
             if not resposta.tool_calls:
-                trace.finish(StopReason.ANSWERED, resposta.content or "")
+                # Coleta encerrada. Quem conclui e o organizador: separar
+                # "juntar evidencia" de "decidir o que ela sustenta" e a razao
+                # de o braco B existir.
                 if verbose:
-                    print("  [orquestrador] resposta final")
+                    print("  [orquestrador] coleta concluida")
                 return {"finished": True}
 
             mensagens = mensagens + [
@@ -174,10 +225,38 @@ async def run_case_graph(case: dict[str, Any], config: RunConfig,
 
             return {"messages": mensagens, "finished": False}
 
+        async def organizador(state: GraphState) -> GraphState:
+            """Decide o que a evidência sustenta e escreve a resposta."""
+            resposta = await client.chat(
+                [
+                    {"role": "system", "content": ORGANIZER_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_case_brief(state['case'])}\n\n"
+                            f"PLANO:\n{state.get('plan', '')}\n\n"
+                            f"EVIDENCIA COLETADA:\n{_evidence_digest(trace)}"
+                        ),
+                    },
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            descartado, final = _split_organizer(resposta.content or "")
+            if descartado:
+                trace.role_notes["organizador"] = descartado
+            if verbose:
+                print(f"  [organizador] descartou: {descartado[:80] or '(nada)'}")
+
+            trace.finish(StopReason.ANSWERED, final or (resposta.content or ""))
+            return {"finished": True}
+
         def executor(state: GraphState) -> str:
-            """Roteia. É o papel que decide continuar ou encerrar."""
+            """Roteia. É o papel que decide continuar, organizar ou encerrar."""
             if state.get("finished"):
-                return END
+                return "organizador"
             if trace.model_calls >= config.max_model_calls:
                 trace.finish(StopReason.MAX_MODEL_CALLS, "limite de chamadas atingido")
                 return END
@@ -189,11 +268,14 @@ async def run_case_graph(case: dict[str, Any], config: RunConfig,
         grafo = StateGraph(GraphState)
         grafo.add_node("planejador", planejador)
         grafo.add_node("orquestrador", orquestrador)
+        grafo.add_node("organizador", organizador)
         grafo.add_edge(START, "planejador")
         grafo.add_edge("planejador", "orquestrador")
         grafo.add_conditional_edges(
-            "orquestrador", executor, {"orquestrador": "orquestrador", END: END}
+            "orquestrador", executor,
+            {"orquestrador": "orquestrador", "organizador": "organizador", END: END},
         )
+        grafo.add_edge("organizador", END)
 
         try:
             await grafo.compile().ainvoke(
