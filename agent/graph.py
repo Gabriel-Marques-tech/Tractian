@@ -1,0 +1,442 @@
+"""Braço B: grafo LangGraph com papéis especializados.
+
+Primeira fatia (issue #7): executor, planejador e orquestrador de ferramentas.
+Três porque é o mínimo que resolve um caso — algo que planeje, algo que chame
+ferramenta, algo que roteie. Os outros três papéis entram um por ticket.
+
+Usa o mesmo servidor MCP, o mesmo modelo e a mesma seed do braço A, e emite o
+mesmo `Trace`. A comparação só isola a arquitetura se tudo o mais for idêntico.
+
+Cada `ToolCall` carrega o papel que a originou, o que permite ao relatório
+mostrar de onde veio cada passo da trajetória.
+
+Os prompts de papel são curtos de propósito. Medido no braço A: acima de ~2000
+tokens de prompt, `qwen2.5:1.5b` abandona a emissão estruturada de `tool_calls`
+e volta a escrever a chamada em prosa. Um grafo de seis papéis com prompts
+longos estouraria esse teto em todo nó.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Annotated, Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from agent.llm import LLMClient
+from agent.mcp_client import connect
+from agent.react import _observation
+from agent.trace import Arm, RunConfig, StopReason, Trace
+
+PLANNER_PROMPT = """Voce planeja investigacoes de suporte industrial na TRACTIAN.
+
+Recebe um chamado e lista, em no maximo tres linhas, o que precisa ser
+estabelecido para responder. Nao chame ferramentas. Nao responda ao cliente.
+
+Lembre: o cadastro do ativo nao explica falha. O limiar de RMS vem do baseline.
+Insight ausente pode ser modelo atrasado, sem cobertura, ou dado que nao chegou.
+"""
+
+ORCHESTRATOR_PROMPT = """Voce executa consultas na plataforma industrial da TRACTIAN.
+
+Recebe um plano de investigacao e o que ja foi coletado.
+
+1. Chame a ferramenta de verdade. Nunca escreva a chamada como texto.
+2. Uma consulta so raramente basta. Siga o plano ate ter a evidencia.
+3. Toda leitura traz `mode`: complete, partial, inconclusive, conflict,
+   unavailable. Ausencia de dado NAO e ausencia de problema.
+4. Acao de impacto exige justificativa de 20 caracteres ou mais.
+
+Quando a evidencia do plano estiver coberta, pare de chamar ferramentas e
+escreva "COLETA CONCLUIDA".
+"""
+
+ORGANIZER_PROMPT = """Voce organiza evidencia coletada na plataforma da TRACTIAN
+e escreve a resposta ao cliente.
+
+Recebe o que cada consulta devolveu, com o `mode` de cada uma:
+
+- complete: sustenta conclusao
+- partial: faltam campos, reconheca o que falta
+- inconclusive: NAO sustenta conclusao, diga isso
+- conflict: fontes discordam, diga que discordam em vez de escolher uma
+- unavailable: o dado nao existe agora; ausencia NAO e ausencia de problema
+
+Escreva em duas partes:
+
+DESCARTADO: o que nao sustenta conclusao e por que. Uma linha por item.
+RESPOSTA: a resposta ao cliente em portugues, citando o dado que sustenta cada
+afirmacao. Se a evidencia nao bastar, diga o que falta.
+"""
+
+
+DECIDER_PROMPT = """Voce decide o que vai para o cliente no suporte da TRACTIAN.
+
+Recebe a resposta redigida e a critica de um revisor de outra area.
+
+Escolha uma das tres e escreva na primeira linha:
+ESCOLHA: RESPOSTA | CRITICA | SOMA
+
+- RESPOSTA: a critica nao procede ou nao muda nada
+- CRITICA: a critica derruba a resposta; o cliente precisa saber disso
+- SOMA: as duas se completam
+
+Na segunda linha escreva "MOTIVO:" e uma frase.
+Depois escreva "FINAL:" e o texto que vai ao cliente, em portugues.
+"""
+
+ADVERSARIAL_PROMPT = """Voce revisa respostas de suporte industrial da TRACTIAN
+assumindo a persona de {persona}.
+
+Recebe a evidencia coletada e a resposta redigida. Seu trabalho e apontar o que
+a investigacao NAO viu, do ponto de vista da sua area. Nao reescreva a
+resposta.
+
+Escreva no maximo tres linhas, cada uma comecando com "-". Se a resposta estiver
+solida do seu ponto de vista, escreva apenas "SEM RESSALVAS".
+"""
+
+PERSONAS = [
+    "um engenheiro de confiabilidade, que desconfia de conclusao sem baseline",
+    "um tecnico de campo, que sabe que sensor offline esconde problema",
+    "um analista de dados, que cobra frescor e completude antes de inferir",
+]
+"""Personas de outras areas do time.
+
+Fixas e ordenadas: a persona precisa ser a mesma entre execucoes do mesmo caso,
+senao ela viraria mais uma fonte de variancia dentro do braco B e sujaria a
+comparacao com o braco A.
+"""
+
+
+def _persona_for(trace: Trace, instance: int = 0) -> str:
+    """Persona estável por caso, e estável entre processos.
+
+    `hash()` de string é salgado por processo em Python, então usá-lo faria a
+    persona mudar a cada execução — virando exatamente a fonte de variância
+    que escolher persona fixa existe para evitar. `sha256` é o mesmo recurso
+    que `api/app/prob.py` usa para ser determinístico.
+    """
+    digest = hashlib.sha256(trace.case_id.encode()).hexdigest()
+    return PERSONAS[(int(digest[:8], 16) + instance) % len(PERSONAS)]
+
+
+def _evidence_digest(trace: Trace) -> str:
+    """Resumo compacto do que foi coletado, para o organizador.
+
+    Compacto por necessidade: o `data` cru das consultas estoura o teto de
+    prompt em que o modelo abandona o comportamento estruturado.
+    """
+    if not trace.steps:
+        return "(nenhuma consulta retornou dado)"
+
+    linhas = []
+    for c in trace.steps:
+        modo = c.mode.value if c.mode else ("recusado" if c.refused else "erro")
+        detalhe = c.notes or ""
+        if c.ok and isinstance(c.data, dict):
+            campos = ", ".join(f"{k}={v}" for k, v in list(c.data.items())[:6]
+                               if not isinstance(v, (list, dict)))
+            detalhe = f"{detalhe} {campos}".strip()
+        linhas.append(f"- {c.as_path_step()} [{modo}] {detalhe}"[:300])
+    return "\n".join(linhas)
+
+
+def _split_decider(texto: str) -> tuple[str, str, str]:
+    """Separa escolha, motivo e o texto que vai ao cliente."""
+    escolha = motivo = final = ""
+    resto = texto
+    alto = resto.upper()
+
+    corte = alto.find("FINAL:")
+    if corte != -1:
+        final = resto[corte + len("FINAL:"):].strip()
+        resto, alto = resto[:corte], alto[:corte]
+
+    corte = alto.find("MOTIVO:")
+    if corte != -1:
+        motivo = resto[corte + len("MOTIVO:"):].strip()
+        resto, alto = resto[:corte], alto[:corte]
+
+    corte = alto.find("ESCOLHA:")
+    if corte != -1:
+        escolha = resto[corte + len("ESCOLHA:"):].strip().split()[0].upper() \
+            if resto[corte + len("ESCOLHA:"):].strip() else ""
+
+    return escolha or "RESPOSTA", motivo, final
+
+
+def _split_organizer(texto: str) -> tuple[str, str]:
+    """Separa o que foi descartado da resposta ao cliente."""
+    alto = texto.upper()
+    corte = alto.find("RESPOSTA:")
+    if corte == -1:
+        return "", texto.strip()
+    descartado = texto[:corte].replace("DESCARTADO:", "", 1).strip()
+    return descartado, texto[corte + len("RESPOSTA:"):].strip()
+
+
+class GraphState(TypedDict, total=False):
+    """Estado que atravessa o grafo."""
+
+    case: dict[str, Any]
+    plan: str
+    messages: list[dict[str, Any]]
+    trace: Trace
+    finished: bool
+    draft: str
+    critique: str
+
+
+def _case_brief(case: dict[str, Any]) -> str:
+    partes = [f"CHAMADO: {case['message']}"]
+    for chave, rotulo in (("asset_id", "ATIVO"), ("company_id", "EMPRESA"), ("id", "CASO")):
+        if case.get(chave):
+            partes.append(f"{rotulo}: {case[chave]}")
+    return "\n".join(partes)
+
+
+async def run_case_graph(case: dict[str, Any], config: RunConfig,
+                         verbose: bool = False, client: Any | None = None) -> Trace:
+    """Executa um caso pelo braço B. Nunca levanta: falha vira stop_reason."""
+    trace = Trace(
+        case_id=case["id"],
+        ticket_id=case.get("ticket_id"),
+        message=case["message"],
+        config=config,
+    )
+
+    if client is None:
+        client = LLMClient(base_url=config.model_base_url, model=config.model)
+
+    async with connect(config.api_base_url, seed=config.seed,
+                       include_impact=True, user_id=config.user_id) as tools:
+        schema = await tools.openai_schema()
+
+        async def planejador(state: GraphState) -> GraphState:
+            """Interpreta o chamado e diz o que precisa ser estabelecido."""
+            resposta = await client.chat(
+                [
+                    {"role": "system", "content": PLANNER_PROMPT},
+                    {"role": "user", "content": _case_brief(state["case"])},
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            plano = (resposta.content or "").strip()
+            if verbose:
+                print(f"  [planejador] {plano[:120]}")
+
+            return {
+                "plan": plano,
+                "messages": [
+                    {"role": "system", "content": ORCHESTRATOR_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_case_brief(state['case'])}\n\n"
+                            f"PLANO DE INVESTIGACAO:\n{plano}"
+                        ),
+                    },
+                ],
+            }
+
+        async def orquestrador(state: GraphState) -> GraphState:
+            """Monta argumentos, chama o servidor MCP e devolve as observações."""
+            mensagens = state["messages"]
+            resposta = await client.chat(mensagens, schema)
+
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            if not resposta.tool_calls:
+                # Coleta encerrada. Quem conclui e o organizador: separar
+                # "juntar evidencia" de "decidir o que ela sustenta" e a razao
+                # de o braco B existir.
+                if verbose:
+                    print("  [orquestrador] coleta concluida")
+                return {"finished": True}
+
+            mensagens = mensagens + [
+                {
+                    "role": "assistant",
+                    "content": resposta.content or "",
+                    "tool_calls": [
+                        {
+                            "id": c.id,
+                            "type": "function",
+                            "function": {
+                                "name": c.name,
+                                "arguments": json.dumps(c.arguments, ensure_ascii=False),
+                            },
+                        }
+                        for c in resposta.tool_calls
+                    ],
+                }
+            ]
+
+            for pedido in resposta.tool_calls:
+                if len(trace.steps) >= config.max_steps:
+                    break
+                chamada = await tools.call(
+                    pedido.name, pedido.arguments, role="orquestrador_tools"
+                )
+                chamada.recovered_from_text = pedido.recovered
+                registrada = trace.record(chamada)
+
+                if verbose:
+                    modo = registrada.mode.value if registrada.mode else "-"
+                    print(f"  [orquestrador] {registrada.as_path_step()} mode={modo}")
+
+                mensagens = mensagens + [
+                    {
+                        "role": "tool",
+                        "tool_call_id": pedido.id,
+                        "content": _observation(registrada),
+                    }
+                ]
+
+            return {"messages": mensagens, "finished": False}
+
+        async def organizador(state: GraphState) -> GraphState:
+            """Decide o que a evidência sustenta e escreve a resposta."""
+            resposta = await client.chat(
+                [
+                    {"role": "system", "content": ORGANIZER_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_case_brief(state['case'])}\n\n"
+                            f"PLANO:\n{state.get('plan', '')}\n\n"
+                            f"EVIDENCIA COLETADA:\n{_evidence_digest(trace)}"
+                        ),
+                    },
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            descartado, final = _split_organizer(resposta.content or "")
+            if descartado:
+                trace.role_notes["organizador"] = descartado
+            if verbose:
+                print(f"  [organizador] descartou: {descartado[:80] or '(nada)'}")
+
+            return {"draft": final or (resposta.content or "")}
+
+        async def adversarial(state: GraphState) -> GraphState:
+            """Olha a resposta por outros olhos e aponta o que ficou de fora.
+
+            Sem ferramentas: a critica tem que sair da evidencia ja coletada.
+            Dar ferramenta a este papel o transformaria num segundo coletor, e
+            o que se quer dele e a leitura, nao mais dados.
+            """
+            persona = _persona_for(trace)
+            resposta = await client.chat(
+                [
+                    {"role": "system",
+                     "content": ADVERSARIAL_PROMPT.format(persona=persona)},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"EVIDENCIA:\n{_evidence_digest(trace)}\n\n"
+                            f"RESPOSTA REDIGIDA:\n{state.get('draft', '')}"
+                        ),
+                    },
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            critica = (resposta.content or "").strip()
+            trace.role_notes["adversarial"] = f"[{persona}] {critica}"
+            if verbose:
+                print(f"  [adversarial] {critica[:100]}")
+
+            return {"critique": critica}
+
+        async def decisor(state: GraphState) -> GraphState:
+            """Escolhe o que vai ao cliente e registra o motivo."""
+            resposta = await client.chat(
+                [
+                    {"role": "system", "content": DECIDER_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"RESPOSTA REDIGIDA:\n{state.get('draft', '')}\n\n"
+                            f"CRITICA DO REVISOR:\n{state.get('critique', '')}"
+                        ),
+                    },
+                ]
+            )
+            trace.model_calls += 1
+            trace.prompt_tokens += resposta.prompt_tokens or 0
+            trace.completion_tokens += resposta.completion_tokens or 0
+
+            escolha, motivo, final = _split_decider(resposta.content or "")
+            trace.role_notes["decisor"] = f"{escolha}: {motivo}"
+            if verbose:
+                print(f"  [decisor] {escolha} — {motivo[:80]}")
+
+            # Sem texto final utilizavel, o rascunho do organizador prevalece:
+            # entregar vazio ao cliente seria pior que entregar o rascunho.
+            trace.finish(StopReason.ANSWERED, final or state.get("draft", ""))
+            return {"finished": True}
+
+        def executor(state: GraphState) -> str:
+            """Roteia. É o papel que decide continuar, organizar ou encerrar."""
+            if state.get("finished"):
+                return "organizador"
+            if trace.model_calls >= config.max_model_calls:
+                trace.finish(StopReason.MAX_MODEL_CALLS, "limite de chamadas atingido")
+                return END
+            if len(trace.steps) >= config.max_steps:
+                trace.finish(StopReason.MAX_STEPS, "limite de passos atingido")
+                return END
+            return "orquestrador"
+
+        grafo = StateGraph(GraphState)
+        grafo.add_node("planejador", planejador)
+        grafo.add_node("orquestrador", orquestrador)
+        grafo.add_node("organizador", organizador)
+        grafo.add_node("adversarial", adversarial)
+        grafo.add_node("decisor", decisor)
+        grafo.add_edge(START, "planejador")
+        grafo.add_edge("planejador", "orquestrador")
+        grafo.add_conditional_edges(
+            "orquestrador", executor,
+            {"orquestrador": "orquestrador", "organizador": "organizador", END: END},
+        )
+        grafo.add_edge("organizador", "adversarial")
+        grafo.add_edge("adversarial", "decisor")
+        grafo.add_edge("decisor", END)
+
+        try:
+            await grafo.compile().ainvoke(
+                {"case": case, "messages": [], "trace": trace, "finished": False},
+                {"recursion_limit": config.max_steps * 3 + 10},
+            )
+        except Exception as exc:  # noqa: BLE001
+            trace.error = str(exc)
+            if trace.stop_reason is None:
+                trace.finish(StopReason.ERROR)
+
+    if trace.stop_reason is None:
+        trace.finish(StopReason.ERROR)
+    return trace
+
+
+def multiagent_config(**overrides: Any) -> RunConfig:
+    """Config padrão do braço B: idêntica à do A, exceto o braço."""
+    from agent.react import baseline_config
+
+    base = baseline_config().model_dump()
+    base["arm"] = Arm.MULTI_AGENT
+    base.update(overrides)
+    return RunConfig(**base)

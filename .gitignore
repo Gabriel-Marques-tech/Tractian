@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+api/.venv/
+
+# Runtime (make up)
+.run/
+
+# Secrets
+agent/.env
+.env
+
+# Resíduo do zip entregue pela Tractian (macOS)
+inteli-tractian-project(2)/
+
+# Traces da bateria oficial ficam versionados: sao a evidencia que permite
+# conferir os numeros do README sem re-executar 3 horas de modelo. Sao ~1 MB.
+# Execucoes exploratorias, nao.
+runs/smoke/
+runs/demo-*.jsonl
+
+# Inspetor: artefatos gerados
+ui/node_modules/
+ui/dist/
+ui/public/data/runs.json
+ui/src/schema.json
