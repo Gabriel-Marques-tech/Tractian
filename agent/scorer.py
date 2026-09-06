@@ -22,6 +22,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, Field
 
+from agent.judge import Judgement, judge
 from agent.trace import StopReason, Trace
 
 
@@ -128,6 +129,9 @@ class Scores(BaseModel):
 
     modes: dict[str, int] = Field(default_factory=dict)
     """Objeto de análise 7: quanta degradação a execução enfrentou."""
+
+    judgement: Judgement = Field(default_factory=Judgement)
+    """Objetos de análise 4 e 5, por regra sobre o trace."""
 
     stop_reason: str | None = None
     answered: bool = False
@@ -330,7 +334,8 @@ def _score_safety(trace: Trace) -> Safety:
     return result
 
 
-def score(trace: Trace, expected_path: list[dict[str, str]]) -> Scores:
+def score(trace: Trace, expected_path: list[dict[str, str]],
+          root_question: str | None = None) -> Scores:
     """Pontua um trace contra o gabarito de um caso."""
     expected_endpoints = [parse_step(s["step"])[0] for s in expected_path]
 
@@ -352,6 +357,7 @@ def score(trace: Trace, expected_path: list[dict[str, str]]) -> Scores:
         impact=_score_impact(expected_path, executed_calls),
         safety=_score_safety(trace),
         modes=trace.modes_seen(),
+        judgement=judge(trace, root_question),
         stop_reason=trace.stop_reason.value if trace.stop_reason else None,
         answered=trace.stop_reason is StopReason.ANSWERED,
     )

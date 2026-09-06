@@ -234,8 +234,33 @@ Seis dos nove objetos de análise são **determinísticos**, comparados contra o
 | 4 | Uso de evidências | LLM-judge | modelo |
 | 5 | Qualidade da resposta | LLM-judge | modelo |
 
-Isso tira o custo do *pontuar* e deixa só no *rodar*, o que torna o experimento
-viável no hardware disponível.
+**Nove de nove com custo zero.** Isso tira o custo inteiramente do *pontuar* e
+deixa só no *rodar*, o que torna o experimento viável no hardware disponível.
+
+### Por que o judge é determinístico
+
+Os objetos 4 e 5 costumam pedir LLM-judge. O único juiz disponível aqui seria o
+próprio `qwen2.5:1.5b` que produziu as respostas — um modelo julgando a si
+mesmo, e um modelo pequeno é juiz fraco mesmo julgando outro. O número não se
+defenderia numa apresentação.
+
+Regra sobre o trace é auditável linha a linha, e mede exatamente o modo de
+falha que as execuções exibem:
+
+| Critério | Regra | Objeto |
+|---|---|---|
+| Ancoragem | valores citados na resposta que existem na evidência recebida | 4 |
+| Alucinação | valores citados que não aparecem em evidência nenhuma | 4 |
+| Reconhece a degradação | a resposta menciona os `mode` que de fato ocorreram | 5 |
+| Cobre a pergunta raiz | termos de `root_question` presentes na resposta | 5 |
+
+O chamado do cliente conta como fonte válida: repetir um valor que o cliente
+informou não é inventar. A rubrica é versionada (`RUBRIC_VERSION`) e gravada em
+cada nota, porque comparar notas de rubricas diferentes não é comparação.
+
+**Limitação**: alucinação de *interpretação* escapa. Afirmar "baseline
+estabelecido" quando ele está em `learning` é falso e passa, porque nenhum
+valor foi inventado. Só valor citado e menção de `mode` são pegáveis por regra.
 
 ### Decisões de medição que mudaram os números
 
@@ -289,6 +314,9 @@ completas em [`docs/resultados.md`](docs/resultados.md), geradas por
 | Alterações de config indevidas | **0** | 3 | pior |
 | Recusas do gate | 0 | 7 | |
 | Chamadas resgatadas de texto | **0%** | 27% | |
+| Ancoragem (objeto 4) | **2,55 / 5** | 0,89 / 5 | pior |
+| Qualidade da resposta (objeto 5) | 2,38 / 5 | 2,36 / 5 | empate |
+| Alucinação por valor citado | **45%** | 54% | pior |
 
 A previsão era "melhor qualidade ao custo de mais chamadas". O custo confirmou;
 a qualidade não. O braço multi-agente é **pior em toda métrica de qualidade,
@@ -357,6 +385,29 @@ próxima iteração deveria atacar primeiro.
 Ele também deixa de executar 35 ações que o gabarito exigia — não age quando
 deveria. O braço B erra na direção oposta: age quando não deveria. Nenhum dos
 dois acerta o critério.
+
+### O que o judge revelou
+
+**Quase metade do que os agentes afirmam não está na evidência.** 45% dos
+valores citados pelo braço A e 54% dos do braço B não aparecem em nenhuma
+resposta de ferramenta nem no chamado do cliente.
+
+A comparação precisa ser por **taxa**, não por contagem: o braço A cita 346
+valores e alucina 154; o B cita 74 e alucina 40. Em absoluto pareceria que o A
+inventa quatro vezes mais, quando ele apenas fala mais sobre dado — e erra
+proporcionalmente menos.
+
+O braço B cita dado em apenas **35 de 85** respostas, contra 71 de 85 do A.
+Mais papéis deliberando produziu resposta mais genérica, não mais fundamentada.
+
+**Os dois reconhecem bem a degradação** (4,12 e 3,96 de 5): quando a API devolve
+`partial` ou `conflict`, a resposta costuma mencionar. Esse é o único critério
+em que ambos vão bem.
+
+**E os dois falham em responder o que foi perguntado**: 0,94 e 0,89 de 5. Em 44
+das 85 execuções do braço A, a resposta não toca nenhum termo da pergunta raiz
+do caso. O agente descreve o ativo em vez de explicar o evento — que é
+exatamente o laço observado no `TKT-CTX-01`.
 
 ## 8. Limitações
 
