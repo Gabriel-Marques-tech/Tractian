@@ -48,9 +48,11 @@ A variável manipulada é **a arquitetura**. Todo o resto — modelo, seed,
 ferramentas, permissões — é idêntico, porque qualquer diferença viraria variável
 de confusão.
 
-**O agente entregue é o braço A**, e essa escolha saiu do experimento: ele vence
-em toda métrica de qualidade, custa um terço das chamadas e é o único com zero
-ações indevidas. A seção de resultados traz os números.
+**O agente entregue é o braço A**, por custo e estabilidade — um terço das
+chamadas ao modelo e trajetória praticamente determinística. A diferença de
+**qualidade** entre os braços não é sustentada pelos dados: fica dentro do
+ruído. A seção de resultados detalha, incluindo o erro de execução que
+comprometeu a comparação.
 
 ## 3. Arquitetura
 
@@ -308,78 +310,79 @@ agente ainda assim desistindo no primeiro passo.
 
 ## 7. Resultados
 
-170 execuções: 17 casos × 5 repetições × 2 braços, sob a mesma seed. Tabelas
-completas em [`docs/resultados.md`](docs/resultados.md), geradas por
-`python -m agent.report`.
+### O que foi medido
 
-### A hipótese foi refutada
+**Braço A: 85 execuções** — 17 casos × 5 repetições, seed `exp-2026-09`.
 
-| Métrica | Braço A | Braço B | |
+| Métrica | Braço A |
+|---|---|
+| Trajetória contra o gabarito | 0,09 ± 0,13 |
+| Recall de ferramentas | 0,10 ± 0,15 |
+| Precisão de ferramentas | 0,34 ± 0,47 |
+| Instabilidade entre repetições | 0,004 |
+| Chamadas ao modelo por execução | 1,9 |
+| Segundos por execução | 33 |
+| Ancoragem (objeto 4) | 3,29 ± 2,26 (n=66) |
+| Respostas que citam dado | 66 / 85 |
+| Alucinação por valor citado | 22% |
+| Reconhece a degradação da API | 4,12 / 5 |
+| Cobre a pergunta raiz | 0,94 / 5 |
+| Ações exigidas não executadas | 35 |
+| Ações executadas sem o caso pedir | 0 |
+
+### A hipótese não foi respondida
+
+Esta é a conclusão honesta, e ela é mais fraca do que este documento afirmava
+numa versão anterior.
+
+**A comparação entre braços está comprometida por um erro de execução.** A
+bateria do braço B rodou sob a seed `exp` enquanto a do A rodou sob
+`exp-2026-09` — o comando do braço B foi lançado sem `--config`, caindo num
+default divergente. Como a API deriva a degradação de `sha256(seed|recurso|
+categoria)`, **54% dos endpoints do gabarito resolvem para `mode` diferente
+entre as duas seeds**. Os braços enfrentaram ambientes diferentes.
+
+O relatório agora **recusa** comparar braços cuja configuração difira, nomeando
+o campo. O braço B está sendo re-executado sob a seed correta; até que feche, a
+comparação de qualidade não é reportável.
+
+**E mesmo com a seed corrigida, as diferenças observadas não sobrevivem ao
+teste.** Sobre os dados anteriores, teste pareado por caso (n = 17):
+
+| Métrica | diferença A − B | t(16) | IC 95% |
 |---|---|---|---|
-| Trajetória | **0,09 ± 0,13** | 0,06 ± 0,12 | pior |
-| Recall de ferramentas | **0,10 ± 0,15** | 0,07 ± 0,15 | pior |
-| Precisão de ferramentas | **0,34 ± 0,47** | 0,19 ± 0,39 | pior |
-| Chamadas ao modelo por execução | **1,9** | 5,7 | 3× o custo |
-| Segundos por execução | **33** | 62 | 2× o tempo |
-| Instabilidade entre repetições | **0,004** | 0,013 | 3× menos estável |
-| Ações executadas sem o caso pedir | **0** | 4 | pior |
-| Alterações de config indevidas | **0** | 3 | pior |
-| Recusas do gate | 0 | 7 | |
-| Chamadas resgatadas de texto | **0%** | 27% | |
-| Ancoragem (objeto 4) | **2,55 / 5** | 0,89 / 5 | pior |
-| Qualidade da resposta (objeto 5) | 2,38 / 5 | 2,36 / 5 | empate |
-| Alucinação por valor citado | **45%** | 54% | pior |
+| Trajetória | +0,031 | 0,91 | [−0,042; +0,104] |
+| Recall | +0,035 | 0,99 | [−0,040; +0,111] |
+| Precisão | +0,143 | 1,21 | [−0,107; +0,393] |
 
-A previsão era "melhor qualidade ao custo de mais chamadas". O custo confirmou;
-a qualidade não. O braço multi-agente é **pior em toda métrica de qualidade,
-três vezes mais caro, menos estável e menos seguro**.
+Em trajetória, **11 dos 17 casos empatam exatamente**. O intervalo de confiança
+cruza zero em todas. Com 17 casos e este tamanho de efeito, o experimento não
+tem poder estatístico para distinguir as arquiteturas em qualidade — e dizer o
+contrário seria ler ruído como sinal.
 
-Por categoria, a derrota é consistente: contextualizar 0,14 contra 0,08 e
-investigar 0,09 contra 0,04. O braço B só empata em executar (0,07 contra
-0,08) — e empata agindo errado, como a seção de segurança mostra.
+### O que os dados sustentam
 
-### O mecanismo: imposto de protocolo
+**O custo é a única diferença sólida.** O braço B faz 5,7 chamadas ao modelo
+por execução contra 1,9 do A, e leva 62s contra 33s. Isso é determinado pela
+arquitetura — seis papéis fazem seis chamadas — e independe da seed, do
+ambiente e do tamanho da amostra.
 
-Os **27% de chamadas resgatadas de texto** explicam a diferença, e são o achado
-central.
+**O braço A é praticamente determinístico**: instabilidade 0,004, com 15 dos 17
+casos produzindo trajetória idêntica nas 5 repetições. Isso é propriedade útil
+num agente de suporte: a mesma pergunta recebe a mesma investigação.
 
-Cada papel do braço B carrega o próprio prompt de sistema. Medido antes da
-bateria: acima de ~2000 tokens de prompt, `qwen2.5:1.5b` abandona a emissão
-estruturada de `tool_calls` e escreve a chamada em prosa. A pipeline paga esse
-imposto em **todo nó**, e o agente de nó único não paga nenhum.
+**Nenhum dos dois investiga o suficiente.** Trajetória de 0,09 sobre gabaritos
+de 1 a 5 passos. E a cobertura da pergunta raiz é 0,94 de 5: em 44 das 85
+execuções do braço A, a resposta não toca nenhum termo da pergunta que o caso
+faz. O agente descreve o ativo em vez de explicar o evento.
 
-A conclusão não é que orquestrar seja ruim em tese. É que **num modelo de 1,5B
-o custo de contexto de cada papel come o ganho da especialização** — e sobra
-prejuízo. Sem o resgate no cliente, o braço B teria pontuado perto de zero e a
-comparação seria entre um agente e um agente quebrado.
+**Quase um quarto do que o agente afirma não está na evidência.** 22% dos
+valores citados não aparecem em nenhuma resposta de ferramenta nem no chamado
+do cliente.
 
-### A descoberta de segurança
+### O modo de falha, visto no inspetor
 
-O braço B executou **quatro ações não pedidas pelo caso, três delas `PATCH` de
-configuração** — alterou estado de ativo sem o chamado pedir. O braço A: zero.
-
-Mais papéis deliberando produziu mais confiança para agir, não mais critério. O
-revisor adversarial e o decisor, que existiam justamente para conter conclusão
-apressada, não contiveram.
-
-**O gate no servidor MCP provou seu valor**: sete recusas. Se ele vivesse no
-prompt do agente, como no desenho original, essas sete teriam passado — e o
-braço B teria sete alterações indevidas em vez de três.
-
-### O que decorre disso
-
-**O agente entregue à TRACTIAN é o braço A.** A decisão não é preferência: ele
-vence em qualidade, custa um terço, é três vezes mais estável e é o único com
-zero ações indevidas.
-
-O braço B permanece no repositório porque é a evidência que sustenta essa
-escolha, não código morto. Um experimento que só guarda o vencedor não permite
-que ninguém verifique a comparação.
-
-### Onde o agente ainda falha
-
-Trajetória de 0,09 significa que o baseline acerta pouco. O inspetor mostra
-por quê, num caso que a métrica sozinha não explicaria — `TKT-CTX-01`:
+Trajetória de 0,09 é um número. O inspetor mostra a causa, no `TKT-CTX-01`:
 
 ```
 1  GET /assets/asset_M101               conflito
@@ -391,35 +394,42 @@ por quê, num caso que a métrica sozinha não explicaria — `TKT-CTX-01`:
 
 Ao receber `mode=conflict`, o agente **entra em laço** entre dois endpoints em
 vez de buscar a fonte que resolveria o conflito, e termina devolvendo o JSON
-cru ao cliente. É o modo de falha mais frequente do braço A, e é o que uma
-próxima iteração deveria atacar primeiro.
+cru ao cliente. É o modo de falha mais frequente, e o que uma próxima iteração
+deve atacar primeiro.
 
-Ele também deixa de executar 35 ações que o gabarito exigia — não age quando
-deveria. O braço B erra na direção oposta: age quando não deveria. Nenhum dos
-dois acerta o critério.
+### A escolha do agente entregue
 
-### O que o judge revelou
+**O agente entregue à TRACTIAN é o braço A**, e o motivo é custo e
+estabilidade, não superioridade de qualidade — que os dados não sustentam.
 
-**Quase metade do que os agentes afirmam não está na evidência.** 45% dos
-valores citados pelo braço A e 54% dos do braço B não aparecem em nenhuma
-resposta de ferramenta nem no chamado do cliente.
+Duas ressalvas que o leitor precisa ter:
 
-A comparação precisa ser por **taxa**, não por contagem: o braço A cita 346
-valores e alucina 154; o B cita 74 e alucina 40. Em absoluto pareceria que o A
-inventa quatro vezes mais, quando ele apenas fala mais sobre dado — e erra
-proporcionalmente menos.
+O braço A tem **zero ações executadas indevidamente**, mas isso é artefato de
+**inação**: ele também executou **zero** ações de impacto corretas, omitindo as
+35 que o gabarito exigia. Um agente que nunca age pontua perfeito nessa
+métrica. Usá-la como critério de escolha seria seleção conveniente.
 
-O braço B cita dado em apenas **35 de 85** respostas, contra 71 de 85 do A.
-Mais papéis deliberando produziu resposta mais genérica, não mais fundamentada.
+Os dois erram em direções opostas — o braço A não age quando deveria, o braço B
+agiu quando não devia. **Nenhum dos dois atende ao critério.**
 
-**Os dois reconhecem bem a degradação** (4,12 e 3,96 de 5): quando a API devolve
-`partial` ou `conflict`, a resposta costuma mencionar. Esse é o único critério
-em que ambos vão bem.
+### Como estes números foram corrigidos
 
-**E os dois falham em responder o que foi perguntado**: 0,94 e 0,89 de 5. Em 44
-das 85 execuções do braço A, a resposta não toca nenhum termo da pergunta raiz
-do caso. O agente descreve o ativo em vez de explicar o evento — que é
-exatamente o laço observado no `TKT-CTX-01`.
+Uma revisão adversarial em cinco frentes encontrou defeitos que invalidavam
+números publicados numa versão anterior deste documento. Registrados porque
+mudam o quanto se deve confiar no resto:
+
+- **Argumentos da chamada contavam como evidência.** Em `case_tkt_inv_06` o
+  modelo fabricou um id, a API devolveu 404, e a ancoragem dava 5/5.
+- **Silêncio pontuava como fabricação.** 60 dos 93 zeros em ancoragem eram
+  respostas que simplesmente não citavam valor. Agora a nota é indefinida e a
+  agregação declara o `n`.
+- **A régua media a si mesma.** 109 das 154 "alucinações" do braço A eram
+  numeradores de lista markdown; timestamps na evidência davam âncora grátis; e
+  `S420` na resposta não casava com `asset_S420` na evidência.
+
+Depois das correções, a ancoragem do braço A passou de 2,55 sobre 85 para 3,29
+sobre os 66 que de fato citam dado, e a taxa de alucinação caiu de 45% para
+22%. Mais da metade do erro medido era da régua, não do agente.
 
 ## 8. Limitações
 
@@ -446,6 +456,22 @@ outras sete métricas não dependem dele.
 
 **Um smoke test de 3 casos não substitui os 17.** Ele existe para barrar bateria
 inútil, não para concluir.
+
+**17 casos não dão poder estatístico para comparar arquiteturas.** Com o
+tamanho de efeito observado, o intervalo de confiança de 95% cruza zero em
+todas as métricas de qualidade. O experimento distingue custo, não qualidade —
+e aumentar repetições não resolve, porque a variância entre repetições já é
+quase nula; seria preciso mais **casos**.
+
+**A comparação entre braços foi executada com seeds diferentes.** Erro de
+operação: a bateria do braço B foi lançada sem `--config`. O relatório agora
+recusa comparar braços com configuração divergente, mas os números de
+comparação deste documento aguardam a re-execução.
+
+**O judge determinístico mede o que é verificável, não o que importa mais.**
+Ancoragem por valor pega afirmação sobre dado não consultado. Não pega
+alucinação de *interpretação*: dizer "baseline estabelecido" quando ele está em
+`learning` é falso e passa, porque nenhum valor foi inventado.
 
 ## 9. Possibilidades de evolução
 
