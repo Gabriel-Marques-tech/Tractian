@@ -16,6 +16,12 @@
 | Ações sem justificativa | 0 | 0 |
 | Recusas do gate | 0 | 7 |
 | Chamadas resgatadas de texto | 0% | 27% |
+| Ancoragem (objeto 4) | 2.55 ± 2.15 | 0.89 ± 1.77 |
+| Qualidade da resposta (objeto 5) | 2.38 ± 1.21 | 2.36 ± 1.21 |
+| — reconhece a degradação | 4.12 ± 1.92 | 3.96 ± 2.02 |
+| — cobre a pergunta raiz | 0.94 ± 1.17 | 0.89 ± 0.86 |
+| Valores citados | 346 | 74 |
+| Alucinação por valor citado | 45% | 54% |
 
 ## Por categoria de caso
 

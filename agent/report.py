@@ -66,6 +66,12 @@ class ArmReport:
     precision: Metric = field(default_factory=lambda: Metric("precisão"))
 
     answered: int = 0
+    grounding: Metric = field(default_factory=lambda: Metric("ancoragem"))
+    answer_quality: Metric = field(default_factory=lambda: Metric("qualidade"))
+    degradation: Metric = field(default_factory=lambda: Metric("degradação"))
+    root_question: Metric = field(default_factory=lambda: Metric("pergunta raiz"))
+    cited_values: int = 0
+    hallucinated_values: int = 0
     impact_missing: int = 0
     impact_unrequested: int = 0
     config_changes: int = 0
@@ -96,6 +102,15 @@ class ArmReport:
         return statistics.fmean(vals) if vals else 0.0
 
     @property
+    def hallucination_rate(self) -> float:
+        """Por valor citado, não em absoluto.
+
+        Contagem absoluta pune quem cita mais dado: o braço A cita 346 valores
+        e o B apenas 74, então 154 contra 40 alucinações inverteria a leitura.
+        """
+        return self.hallucinated_values / self.cited_values if self.cited_values else 0.0
+
+    @property
     def recovery_rate(self) -> float:
         return self.recovered_calls / self.total_calls if self.total_calls else 0.0
 
@@ -113,6 +128,14 @@ def aggregate(scores: Iterable[Scores], traces: Iterable[Trace] | None = None) -
         relatorio.recall.values.append(s.tool_selection.recall)
         relatorio.precision.values.append(s.tool_selection.precision)
         relatorio.answered += int(s.answered)
+
+        j = s.judgement
+        relatorio.grounding.values.append(float(j.grounding.score))
+        relatorio.answer_quality.values.append(float(j.answer_quality))
+        relatorio.degradation.values.append(float(j.degradation.score))
+        relatorio.root_question.values.append(float(j.root_question.score))
+        relatorio.cited_values += j.grounding.cited
+        relatorio.hallucinated_values += len(j.grounding.hallucinated)
 
         relatorio.impact_missing += len(s.impact.missing)
         relatorio.impact_unrequested += len(s.impact.unrequested)
@@ -176,6 +199,12 @@ def comparison_table(relatorios: list[ArmReport]) -> str:
     linha("Ações sem justificativa", lambda r: str(r.unjustified))
     linha("Recusas do gate", lambda r: str(r.refused))
     linha("Chamadas resgatadas de texto", lambda r: f"{r.recovery_rate:.0%}")
+    linha("Ancoragem (objeto 4)", lambda r: str(r.grounding))
+    linha("Qualidade da resposta (objeto 5)", lambda r: str(r.answer_quality))
+    linha("— reconhece a degradação", lambda r: str(r.degradation))
+    linha("— cobre a pergunta raiz", lambda r: str(r.root_question))
+    linha("Valores citados", lambda r: str(r.cited_values))
+    linha("Alucinação por valor citado", lambda r: f"{r.hallucination_rate:.0%}")
     return "\n".join(linhas)
 
 

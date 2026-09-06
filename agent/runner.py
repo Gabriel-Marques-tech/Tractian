@@ -124,6 +124,17 @@ def drop_failed(out_dir: str | Path) -> int:
     return len(descartar)
 
 
+def _root_questions() -> dict[str, str]:
+    """Pergunta raiz por caso, do gabarito. O judge mede cobertura contra ela."""
+    caminho = Path(__file__).resolve().parent.parent / "eval" / "expected-paths.json"
+    if not caminho.exists():
+        return {}
+    return {
+        g["ticket_id"]: g.get("root_question", "")
+        for g in json.loads(caminho.read_text(encoding="utf-8"))
+    }
+
+
 def rescore(out_dir: str | Path,
             expected_paths: dict[str, list[dict[str, str]]]) -> int:
     """Recomputa `scores.jsonl` a partir dos traces gravados.
@@ -138,8 +149,13 @@ def rescore(out_dir: str | Path,
     if not traces:
         return 0
 
+    perguntas = _root_questions()
     linhas = [
-        score(t, expected_paths.get(t.ticket_id or "", [])).model_dump_json()
+        score(
+            t,
+            expected_paths.get(t.ticket_id or "", []),
+            perguntas.get(t.ticket_id or ""),
+        ).model_dump_json()
         for t in traces
     ]
     (out / "scores.jsonl").write_text("\n".join(linhas) + "\n", encoding="utf-8")
@@ -212,7 +228,11 @@ async def run_batch(
         # idêntico, e é o que torna a comparação honesta.
         executar = _runner_for(run_config.arm)
         trace = await executar(case, run_config, client=client)
-        resultado = score(trace, expected_paths.get(case.get("ticket_id", ""), []))
+        resultado = score(
+            trace,
+            expected_paths.get(case.get("ticket_id", ""), []),
+            _root_questions().get(case.get("ticket_id", "")),
+        )
 
         # O score vai primeiro, o trace por último. O trace é a chave de
         # retomada: na ordem inversa, morrer entre as duas escritas deixaria a
