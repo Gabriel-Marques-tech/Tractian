@@ -112,6 +112,14 @@ class Scores(BaseModel):
     case_id: str
     ticket_id: str | None = None
     arm: str
+
+    repetition: int = 0
+    """A repetição que produziu esta pontuação.
+
+    Sem ela, trace e score só podiam ser pareados pela ordem de escrita, o que
+    se desfaz assim que um dos arquivos é podado. `(case_id, repetition)` é a
+    mesma chave que a retomada usa.
+    """
     tool_selection: ToolSelection = Field(default_factory=ToolSelection)
     trajectory: Trajectory = Field(default_factory=Trajectory)
     arguments: Arguments = Field(default_factory=Arguments)
@@ -337,6 +345,7 @@ def score(trace: Trace, expected_path: list[dict[str, str]]) -> Scores:
         case_id=trace.case_id,
         ticket_id=trace.ticket_id,
         arm=trace.config.arm.value,
+        repetition=trace.config.repetition,
         tool_selection=_score_tool_selection(expected_str, executed_str),
         trajectory=_score_trajectory(expected_str, executed_str),
         arguments=_score_arguments(expected_path, executed_calls),

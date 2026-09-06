@@ -107,17 +107,43 @@ def drop_failed(out_dir: str | Path) -> int:
     traces_path.write_text("\n".join(manter) + ("\n" if manter else ""), encoding="utf-8")
 
     if scores_path.exists():
-        # `Scores` não carrega a repetição, então a poda é por caso: um caso com
-        # qualquer execução descartada tem todos os scores refeitos na retomada.
-        casos = {c for c, _ in descartar}
-        sobrando = [
-            l for l in scores_path.read_text(encoding="utf-8").splitlines()
-            if l.strip() and json.loads(l)["case_id"] not in casos
-        ]
+        # Poda pela mesma chave que o trace usa. Podar por caso removeria também
+        # os scores das repetições que deram certo, e a retomada não as refaria
+        # — deixando os dois arquivos com contagens diferentes.
+        sobrando = []
+        for l in scores_path.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            registro = json.loads(l)
+            chave = (registro["case_id"], registro.get("repetition", 0))
+            if chave not in descartar:
+                sobrando.append(l)
         scores_path.write_text("\n".join(sobrando) + ("\n" if sobrando else ""),
                                encoding="utf-8")
 
     return len(descartar)
+
+
+def rescore(out_dir: str | Path,
+            expected_paths: dict[str, list[dict[str, str]]]) -> int:
+    """Recomputa `scores.jsonl` a partir dos traces gravados.
+
+    Score é dado derivado: `score()` é função pura sobre o trace, então nunca
+    precisa ser reproduzido por re-execução. É o que torna reanálise grátis, e
+    o que permite reparar um `scores.jsonl` dessincronizado sem gastar uma
+    chamada de modelo.
+    """
+    out = Path(out_dir)
+    traces = list(Trace.read_jsonl(out / "traces.jsonl"))
+    if not traces:
+        return 0
+
+    linhas = [
+        score(t, expected_paths.get(t.ticket_id or "", [])).model_dump_json()
+        for t in traces
+    ]
+    (out / "scores.jsonl").write_text("\n".join(linhas) + "\n", encoding="utf-8")
+    return len(linhas)
 
 
 @dataclass
@@ -264,6 +290,10 @@ async def main(argv: list[str] | None = None) -> int:
         "--retry-failed", action="store_true", dest="retry_failed",
         help="refaz as execucoes que terminaram em erro em vez de pula-las",
     )
+    parser.add_argument(
+        "--rescore-only", action="store_true", dest="rescore_only",
+        help="so recomputa os scores a partir dos traces e sai",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings(args.config, vars(args))
@@ -275,6 +305,11 @@ async def main(argv: list[str] | None = None) -> int:
 
     escolhidos = settings.get("cases")
     casos = [c for c in todos if not escolhidos or c["ticket_id"] in escolhidos]
+
+    if args.rescore_only:
+        quantos = rescore(settings["out_dir"], expected)
+        print(f"recomputados {quantos} scores a partir dos traces")
+        return 0
 
     if args.retry_failed:
         podadas = drop_failed(settings["out_dir"])
