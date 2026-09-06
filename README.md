@@ -130,6 +130,11 @@ Verificar o servidor MCP sem agente e sem modelo:
 api/.venv/bin/python -m agent.check_server
 ```
 
+Ele imprime **13 ferramentas**, não 18: o padrão é `include_impact=False`, e as
+cinco ações que mudam estado só são registradas quando pedidas. O agente as
+recebe (`connect(..., include_impact=True)`); a verificação avulsa não, para não
+oferecer ação de escrita a quem só quer conferir que o servidor sobe.
+
 Um caso, com trajetória comparada ao gabarito:
 
 ```bash
@@ -161,13 +166,20 @@ api/.venv/bin/python -m agent.runner --arm B --out-dir runs/braco-B --retry-fail
 api/.venv/bin/python -m agent.runner --out-dir runs/braco-A --rescore-only
 ```
 
-Inspetor de traces:
+Inspetor de traces. **A ordem importa**: o Vite copia `ui/public/` para
+`ui/dist/` no momento do build, então exportar depois de buildar deixa a
+interface sem dados.
 
 ```bash
-cd ui && npm install && npm run build && cd ..
-api/.venv/bin/python -m agent.export      # gera ui/public/data/runs.json
+api/.venv/bin/python -m agent.export      # 1. gera ui/public/data/runs.json
+cd ui && npm install && npm run build     # 2. build, que carrega os dados junto
+cd .. && make agent-env                   # 3. cria agent/.env (o up-agent exige)
 make up-all                               # API em :8000, inspetor em :8001
 ```
+
+`make agent-env` é exigido pelo `Makefile` da TRACTIAN antes de `up-agent`.
+`agent/server.py` é servidor estático e não lê chave nenhuma, mas o guard
+existe no Makefile do parceiro, que não é editado aqui.
 
 Testes:
 
@@ -469,7 +481,10 @@ agent/
   react.py        braço A
   graph.py        braço B, seis papéis em LangGraph
   scorer.py       pontuação determinística contra o gabarito
+  judge.py        objetos de análise 4 e 5, por regra sobre o trace
   runner.py       bateria resumível
+  check_server.py verificação do servidor MCP, sem agente e sem modelo
+  demo.py         um caso, com trajetória ao lado do gabarito
   smoke.py        portão de decisão
   report.py       agregação e tabelas
   export.py       JSON estático e tipos para o inspetor
