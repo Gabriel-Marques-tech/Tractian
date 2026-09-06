@@ -15,7 +15,7 @@ import pytest
 
 from agent.llm import Completion, ToolRequest
 from agent.runner import completed_runs, pending, run_batch
-from agent.trace import Arm, RunConfig, StopReason, Trace
+from agent.trace import Arm, RunConfig, StopReason, ToolCall, Trace
 
 from conftest import API_BASE_URL, requires_api
 
@@ -343,3 +343,43 @@ def test_drop_failed_em_diretorio_vazio_nao_quebra(tmp_path: Path):
     from agent.runner import drop_failed
 
     assert drop_failed(tmp_path) == 0
+
+
+def test_rescore_reconstroi_os_scores_a_partir_dos_traces(tmp_path: Path):
+    """Score e dado derivado: reanalisar nao pode exigir re-execucao."""
+    from agent.runner import rescore
+
+    await_nada = None  # noqa: F841 - teste sincrono de propósito
+    trace = Trace(case_id="case_a", ticket_id="TKT-A", config=config())
+    trace.record(ToolCall(step=0, tool="t", http_method="GET", http_path="/x"))
+    trace.finish(StopReason.ANSWERED, "ok")
+    trace.append_to(tmp_path / "traces.jsonl")
+
+    quantos = rescore(tmp_path, {"TKT-A": [{"step": "GET /x", "note": ""}]})
+
+    assert quantos == 1
+    linhas = (tmp_path / "scores.jsonl").read_text().strip().splitlines()
+    assert len(linhas) == 1
+    assert json.loads(linhas[0])["trajectory"]["similarity"] == 1.0
+
+
+def test_rescore_devolve_um_score_por_trace(tmp_path: Path):
+    """A dessincronia que motivou isto: 85 traces contra 81 scores."""
+    from agent.runner import rescore
+
+    for r in range(4):
+        t = Trace(case_id="case_a", ticket_id="TKT-A", config=config(repetition=r))
+        t.finish(StopReason.ANSWERED, "ok")
+        t.append_to(tmp_path / "traces.jsonl")
+    (tmp_path / "scores.jsonl").write_text("")
+
+    assert rescore(tmp_path, {"TKT-A": []}) == 4
+    scores = [json.loads(l) for l in
+              (tmp_path / "scores.jsonl").read_text().splitlines() if l.strip()]
+    assert sorted(s["repetition"] for s in scores) == [0, 1, 2, 3]
+
+
+def test_rescore_sem_trace_nao_quebra(tmp_path: Path):
+    from agent.runner import rescore
+
+    assert rescore(tmp_path, {}) == 0

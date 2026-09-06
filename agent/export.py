@@ -30,8 +30,9 @@ ROOT = Path(__file__).resolve().parent.parent
 def _load(run_dir: Path) -> tuple[list[Trace], dict[tuple[str, int], Scores]]:
     """Traces e pontuações de um diretório, indexadas por `(caso, repetição)`.
 
-    `Scores` não carrega a repetição, então o par é reconstruído pela ordem de
-    escrita: o runner grava score e trace na mesma iteração, um por linha.
+    A junção é por chave, nunca pela ordem de escrita: os dois arquivos podem
+    ter contagens diferentes depois de uma poda, e parear por posição colaria o
+    placar de uma execução na outra sem nenhum erro visível.
     """
     traces = list(Trace.read_jsonl(run_dir / "traces.jsonl"))
 
@@ -41,11 +42,11 @@ def _load(run_dir: Path) -> tuple[list[Trace], dict[tuple[str, int], Scores]]:
         if scores_path.exists()
         else []
     )
-    pontuacoes = [Scores.model_validate_json(l) for l in linhas]
 
     indexado: dict[tuple[str, int], Scores] = {}
-    for trace, pontuacao in zip(traces, pontuacoes):
-        indexado[(trace.case_id, trace.config.repetition)] = pontuacao
+    for linha in linhas:
+        pontuacao = Scores.model_validate_json(linha)
+        indexado[(pontuacao.case_id, pontuacao.repetition)] = pontuacao
     return traces, indexado
 
 
