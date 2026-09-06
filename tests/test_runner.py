@@ -282,3 +282,64 @@ async def test_runner_despacha_para_o_braco_certo(tmp_path: Path):
 
     trace = next(iter(Trace.read_jsonl(tmp_path / "traces.jsonl")))
     assert trace.config.arm is Arm.MULTI_AGENT
+
+
+# --- retomada de execucoes que falharam ---------------------------------------
+
+
+def _linha(case_id: str, repeticao: int, stop: str) -> str:
+    return json.dumps({
+        "case_id": case_id, "ticket_id": "TKT-A", "stop_reason": stop,
+        "config": {"repetition": repeticao, "arm": "A", "model": "m",
+                   "model_base_url": "x", "api_base_url": "y"},
+        "steps": [],
+    })
+
+
+def test_execucao_com_erro_pode_ser_excluida_da_retomada(tmp_path: Path):
+    """Falha de ambiente marcaria a execucao como feita para sempre."""
+    arquivo = tmp_path / "traces.jsonl"
+    arquivo.write_text("\n".join([
+        _linha("case_a", 0, "answered"),
+        _linha("case_a", 1, "error"),
+    ]) + "\n")
+
+    assert completed_runs(arquivo) == {("case_a", 0), ("case_a", 1)}
+    assert completed_runs(arquivo, include_failed=False) == {("case_a", 0)}
+
+
+def test_drop_failed_remove_do_disco_e_devolve_a_contagem(tmp_path: Path):
+    from agent.runner import drop_failed
+
+    (tmp_path / "traces.jsonl").write_text("\n".join([
+        _linha("case_a", 0, "answered"),
+        _linha("case_b", 0, "error"),
+        _linha("case_b", 1, "error"),
+    ]) + "\n")
+    (tmp_path / "scores.jsonl").write_text("\n".join([
+        json.dumps({"case_id": "case_a", "arm": "A"}),
+        json.dumps({"case_id": "case_b", "arm": "A"}),
+    ]) + "\n")
+
+    assert drop_failed(tmp_path) == 2
+    assert completed_runs(tmp_path / "traces.jsonl") == {("case_a", 0)}
+    restantes = [json.loads(l) for l in
+                 (tmp_path / "scores.jsonl").read_text().splitlines() if l.strip()]
+    assert [r["case_id"] for r in restantes] == ["case_a"]
+
+
+def test_drop_failed_sem_falha_nao_mexe_em_nada(tmp_path: Path):
+    from agent.runner import drop_failed
+
+    arquivo = tmp_path / "traces.jsonl"
+    arquivo.write_text(_linha("case_a", 0, "answered") + "\n")
+    antes = arquivo.read_text()
+
+    assert drop_failed(tmp_path) == 0
+    assert arquivo.read_text() == antes
+
+
+def test_drop_failed_em_diretorio_vazio_nao_quebra(tmp_path: Path):
+    from agent.runner import drop_failed
+
+    assert drop_failed(tmp_path) == 0

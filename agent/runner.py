@@ -41,12 +41,18 @@ def pending(cases: Iterable[str], repetitions: int, done: set[Run]) -> list[Run]
     ]
 
 
-def completed_runs(traces_path: str | Path) -> set[Run]:
+def completed_runs(traces_path: str | Path, *, include_failed: bool = True) -> set[Run]:
     """Lê o JSONL e devolve as execuções já gravadas.
 
     Linha corrompida é ignorada em vez de derrubar a retomada: uma sessão morta
     no meio da escrita deixa exatamente isso, e recusar-se a continuar por causa
     dela transformaria uma perda de uma execução na perda do batch inteiro.
+
+    `include_failed=False` deixa de fora as execuções que terminaram em erro,
+    para que a retomada as refaça. Sem isso, uma falha de ambiente marca a
+    execução como concluída para sempre: com o Ollama fora do ar, 76 das 85
+    execuções do braço B foram gravadas em segundos como erro de conexão, e a
+    retomada teria pulado todas elas.
     """
     path = Path(traces_path)
     if not path.exists():
@@ -60,10 +66,58 @@ def completed_runs(traces_path: str | Path) -> set[Run]:
                 continue
             try:
                 registro = json.loads(line)
+                if not include_failed and registro.get("stop_reason") == "error":
+                    continue
                 done.add((registro["case_id"], registro["config"]["repetition"]))
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
     return done
+
+
+def drop_failed(out_dir: str | Path) -> int:
+    """Remove do disco as execuções que terminaram em erro, e seus scores.
+
+    Reescreve os dois arquivos em vez de anexar: a retomada precisa de uma
+    linha por `(caso, repeticao)`, e deixar a falha ao lado do reteste faria a
+    agregação contar as duas.
+    """
+    out = Path(out_dir)
+    traces_path, scores_path = out / "traces.jsonl", out / "scores.jsonl"
+    if not traces_path.exists():
+        return 0
+
+    manter: list[str] = []
+    descartar: set[Run] = set()
+    for line in traces_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            registro = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        chave = (registro["case_id"], registro["config"]["repetition"])
+        if registro.get("stop_reason") == "error":
+            descartar.add(chave)
+        else:
+            manter.append(line)
+
+    if not descartar:
+        return 0
+
+    traces_path.write_text("\n".join(manter) + ("\n" if manter else ""), encoding="utf-8")
+
+    if scores_path.exists():
+        # `Scores` não carrega a repetição, então a poda é por caso: um caso com
+        # qualquer execução descartada tem todos os scores refeitos na retomada.
+        casos = {c for c, _ in descartar}
+        sobrando = [
+            l for l in scores_path.read_text(encoding="utf-8").splitlines()
+            if l.strip() and json.loads(l)["case_id"] not in casos
+        ]
+        scores_path.write_text("\n".join(sobrando) + ("\n" if sobrando else ""),
+                               encoding="utf-8")
+
+    return len(descartar)
 
 
 @dataclass
@@ -206,6 +260,10 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repetitions", type=int)
     parser.add_argument("--out-dir", dest="out_dir")
     parser.add_argument("--cases", nargs="*", help="ticket_ids; vazio = todos")
+    parser.add_argument(
+        "--retry-failed", action="store_true", dest="retry_failed",
+        help="refaz as execucoes que terminaram em erro em vez de pula-las",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings(args.config, vars(args))
@@ -217,6 +275,11 @@ async def main(argv: list[str] | None = None) -> int:
 
     escolhidos = settings.get("cases")
     casos = [c for c in todos if not escolhidos or c["ticket_id"] in escolhidos]
+
+    if args.retry_failed:
+        podadas = drop_failed(settings["out_dir"])
+        if podadas:
+            print(f"descartadas {podadas} execucoes que terminaram em erro\n")
 
     config = config_from(settings)
     print(f"braço {config.arm.value} · modelo {config.model} · seed {config.seed}")
