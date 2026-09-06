@@ -14,8 +14,11 @@ agent/.env
 # Resíduo do zip entregue pela Tractian (macOS)
 inteli-tractian-project(2)/
 
-# Traces e resultados de experimento (grandes, regeneráveis)
-runs/*.jsonl
+# Traces da bateria oficial ficam versionados: sao a evidencia que permite
+# conferir os numeros do README sem re-executar 3 horas de modelo. Sao ~1 MB.
+# Execucoes exploratorias, nao.
+runs/smoke/
+runs/demo-*.jsonl
 
 # Inspetor: artefatos gerados
 ui/node_modules/
