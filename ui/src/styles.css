@@ -1,0 +1,99 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #262b36;
+  --fg: #e6e8ee;
+  --dim: #8b93a7;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --info: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+code, pre { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 12.5px; }
+main { max-width: 1600px; margin: 0 auto; padding: 20px; }
+h1 { font-size: 18px; margin: 0; }
+h3 { font-size: 15px; margin: 0; }
+h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+     color: var(--dim); margin: 18px 0 8px; }
+
+.top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+       padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.faded { color: var(--dim); }
+.empty { padding: 60px 20px; color: var(--dim); }
+
+select {
+  background: var(--panel); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+}
+
+.case { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.msg { margin: 0 0 6px; font-size: 15px; }
+.root { margin: 0; color: var(--dim); }
+
+/* Dois braços lado a lado: a comparação é a razão de a tela existir. */
+.arms { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+        gap: 18px; margin-top: 18px; }
+.arm { background: var(--panel); border: 1px solid var(--line);
+       border-radius: 10px; padding: 16px; }
+.arm-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.run-meta { color: var(--dim); margin: 8px 0 0; }
+
+.stability { font-size: 12px; color: var(--warn); }
+.stability.stable { color: var(--ok); }
+
+.steps { list-style: none; margin: 0; padding: 0; }
+.step { border-left: 2px solid var(--line); padding-left: 10px; margin-bottom: 10px; }
+.step.refused { border-left-color: var(--bad); }
+.step-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+             background: none; border: 0; color: inherit; cursor: pointer;
+             padding: 0; text-align: left; width: 100%; }
+.step-n { color: var(--dim); min-width: 16px; }
+.step-path { color: var(--info); }
+.step-ms { margin-left: auto; color: var(--dim); font-size: 11px; }
+.step-args { color: var(--dim); font-size: 12px; padding: 2px 0 0 24px;
+             display: flex; gap: 12px; flex-wrap: wrap; }
+.step-notes { margin: 4px 0 0 24px; color: var(--dim); font-size: 12px; }
+.step-notes.danger { color: var(--bad); }
+.step-data { margin: 6px 0 0 24px; padding: 8px; background: #0b0d11;
+             border-radius: 6px; max-height: 260px; overflow: auto; }
+
+.tag { font-size: 10.5px; padding: 1px 6px; border-radius: 999px;
+       border: 1px solid var(--line); color: var(--dim); }
+.mode-complete { color: var(--ok); border-color: var(--ok); }
+.mode-partial, .mode-inconclusive { color: var(--warn); border-color: var(--warn); }
+.mode-conflict, .mode-unavailable { color: var(--bad); border-color: var(--bad); }
+.tag.impact { color: var(--warn); border-color: var(--warn); }
+.tag.refused { color: var(--bad); border-color: var(--bad); }
+.tag.recovered { color: var(--info); border-color: var(--info); }
+
+.answer { margin: 0; padding: 10px 12px; background: #0b0d11;
+          border-left: 2px solid var(--line); border-radius: 0 6px 6px 0;
+          white-space: pre-wrap; }
+
+.notes { margin: 0; }
+.notes div { margin-bottom: 8px; }
+.notes dt { color: var(--dim); font-size: 11px; text-transform: uppercase; }
+.notes dd { margin: 2px 0 0; white-space: pre-wrap; }
+
+.traj { width: 100%; border-collapse: collapse; }
+.traj th { text-align: left; font-size: 11px; color: var(--dim);
+           text-transform: uppercase; padding-bottom: 4px; font-weight: 500; }
+.traj td { padding: 3px 6px 3px 0; vertical-align: top; }
+.traj tr.hit code { color: var(--ok); }
+.traj .mark { color: var(--ok); text-align: center; width: 20px; }
+
+.score { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+         gap: 10px; }
+.score div { background: #0b0d11; border-radius: 8px; padding: 8px 10px; }
+.score-v { display: block; font-size: 17px; }
+.score-k { display: block; font-size: 11px; color: var(--dim); }
