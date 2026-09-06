@@ -16,3 +16,9 @@ inteli-tractian-project(2)/
 
 # Traces e resultados de experimento (grandes, regeneráveis)
 runs/*.jsonl
+
+# Inspetor: artefatos gerados
+ui/node_modules/
+ui/dist/
+ui/public/data/runs.json
+ui/src/schema.json
