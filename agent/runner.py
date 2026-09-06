@@ -262,7 +262,9 @@ DEFAULTS: dict[str, Any] = {
     "model": "qwen2.5:1.5b",
     "model_base_url": "http://localhost:11434",
     "api_base_url": "http://localhost:8000",
-    "seed": "exp",
+    # Mesma seed de experiment.json. Um default divergente fez o braco B rodar
+    # sob outra degradacao da API quando a bateria foi lancada sem `--config`.
+    "seed": "exp-2026-09",
     "user_id": "usr_ana",
     "max_steps": 10,
     "max_model_calls": 12,

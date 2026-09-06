@@ -58,7 +58,33 @@ MODE_TERMS: dict[str, tuple[str, ...]] = {
 # (`asset_C710`, `mdl_vib_v3`). Palavra comum não conta: senão qualquer termo da
 # resposta viraria "valor citado" e a ancoragem mediria prosa, não dado.
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
-_IDENT = re.compile(r"\b[a-zA-Z]+(?:_[a-zA-Z0-9]+)+\b")
+_IDENT = re.compile(r"\b[a-zA-Z]+(?:_[a-zA-Z0-9]+)+\b|\b[A-Za-z]{1,6}\d{2,}\b")
+"""Identificador do domínio.
+
+Duas formas: `asset_C710` com underscore, e o código curto `S420` sem ele. A
+segunda existe porque a resposta costuma citar o sufixo (`o ativo S420`)
+enquanto a evidência traz o id completo (`asset_S420`) — sem ela, o sufixo
+virava o número solto `420` e era contado como alucinação em 13 traces.
+"""
+_LIST_MARKER = re.compile(r"(?m)^\s{0,3}(?:[-*+]|\d{1,2}[.)])\s+")
+"""Marcador de lista markdown.
+
+109 das 154 "alucinações" medidas no braço A eram numeradores de lista — "1.",
+"2.", "3.". A rubrica contava enumerador como valor citado e penalizava quem
+escreve resposta organizada.
+"""
+
+MIN_DIGITS = 3
+"""Inteiro com menos dígitos que isto não conta como valor de domínio.
+
+Timestamps na evidência (`2024-07-01T10:00:00Z`) espalham `07`, `01`, `10`,
+`00` e davam âncora grátis: 31 dos 226 valores "sustentados" eram números de um
+ou dois dígitos. Ordinais ("1º"), horas e percentuais caem no mesmo balde.
+
+**Decimal escapa da regra**: `4.2 mm/s` é medição, e o limiar de RMS vive
+nessa ordem de grandeza. Contar dígitos ignorando o separador descartaria
+justamente o dado mais relevante do domínio.
+"""
 
 STOPWORDS = {
     "por", "que", "nao", "ha", "apesar", "da", "do", "de", "a", "o", "e", "as",
@@ -82,24 +108,47 @@ def values_in(texto: str | None) -> set[str]:
     """
     if not texto:
         return set()
-    identificadores = {m.group() for m in _IDENT.finditer(texto)}
-    resto = _IDENT.sub(" ", texto)
-    numeros = {m.group().replace(",", ".") for m in _NUMBER.finditer(resto)}
+    limpo = _LIST_MARKER.sub(" ", texto)
+    identificadores = {m.group() for m in _IDENT.finditer(limpo)}
+    resto = _IDENT.sub(" ", limpo)
+    numeros = {
+        m.group().replace(",", ".")
+        for m in _NUMBER.finditer(resto)
+        if ("." in m.group() or "," in m.group()) or len(m.group()) >= MIN_DIGITS
+    }
     return numeros | identificadores
 
 
 def _evidence_values(trace: Trace) -> set[str]:
-    """Tudo que o agente de fato viu: retornos de ferramenta e o próprio chamado.
+    """O que a plataforma de fato devolveu, mais o próprio chamado.
 
-    O chamado entra porque repetir um valor que o cliente informou não é
-    inventar. Sem isso, "o problema no asset_C710" seria contado como alucinação.
+    **Os argumentos da chamada ficam de fora.** Incluí-los deixava o agente
+    sustentar o que ele mesmo havia inventado: em `case_tkt_inv_06` o modelo
+    fabricou o id `case_tkt_inv_06_asset_S420`, a API devolveu 404, e a
+    ancoragem dava 5/5 porque o argumento contava como evidência.
+
+    **Chamada que falhou também fica de fora.** Resposta com erro não entrega
+    dado, então não pode ancorar afirmação.
+
+    O chamado do cliente entra: repetir um valor que o cliente informou não é
+    inventar.
     """
     encontrados = values_in(trace.message)
     for call in trace.steps:
+        if not call.ok or call.refused:
+            continue
         encontrados |= values_in(json.dumps(call.data, ensure_ascii=False, default=str))
-        encontrados |= values_in(json.dumps(call.arguments, ensure_ascii=False, default=str))
         encontrados |= values_in(call.notes)
-    return encontrados
+
+    # `asset_S420` também sustenta uma resposta que diz apenas `S420`. Só os
+    # pedaços com dígito entram: `asset` sozinho casaria com qualquer coisa.
+    partes = {
+        pedaco
+        for valor in encontrados
+        for pedaco in valor.split("_")
+        if any(c.isdigit() for c in pedaco) and len(pedaco) >= MIN_DIGITS
+    }
+    return encontrados | partes
 
 
 def _scale(fracao: float) -> int:
@@ -113,7 +162,14 @@ class Grounding(BaseModel):
     cited: int = 0
     supported: int = 0
     hallucinated: list[str] = Field(default_factory=list)
-    score: int = 0
+
+    score: int | None = None
+    """`None` quando a resposta não cita valor nenhum.
+
+    Silêncio e fabricação não são a mesma falha. Dos 93 traces que pontuavam 0
+    na primeira versão, 60 apenas não citaram valor — colapsar os dois numa nota
+    só tornava a média ilegível.
+    """
 
 
 class Degradation(BaseModel):
@@ -147,8 +203,8 @@ def _grounding(trace: Trace) -> Grounding:
     resposta = trace.final_answer or ""
     citados = values_in(resposta)
     if not citados:
-        # Não citar dado não é o mesmo que citar dado correto. Uma resposta sem
-        # nenhum valor não está ancorada em nada.
+        # Sem valor citado não há ancoragem a medir. `score=None` deixa a
+        # agregação ignorar o caso em vez de contá-lo como fabricação total.
         return Grounding()
 
     evidencia = _evidence_values(trace)

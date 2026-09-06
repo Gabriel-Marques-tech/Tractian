@@ -12,6 +12,7 @@ entre braços significa alguma coisa é o tamanho dela contra o ruído de cada u
 
 from __future__ import annotations
 
+import json
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,7 +131,10 @@ def aggregate(scores: Iterable[Scores], traces: Iterable[Trace] | None = None) -
         relatorio.answered += int(s.answered)
 
         j = s.judgement
-        relatorio.grounding.values.append(float(j.grounding.score))
+        # `None` significa "sem valor citado, nada a medir" — entrar como 0
+        # misturaria silêncio com fabricação e puxaria a média para baixo.
+        if j.grounding.score is not None:
+            relatorio.grounding.values.append(float(j.grounding.score))
         relatorio.answer_quality.values.append(float(j.answer_quality))
         relatorio.degradation.values.append(float(j.degradation.score))
         relatorio.root_question.values.append(float(j.root_question.score))
@@ -199,7 +203,9 @@ def comparison_table(relatorios: list[ArmReport]) -> str:
     linha("Ações sem justificativa", lambda r: str(r.unjustified))
     linha("Recusas do gate", lambda r: str(r.refused))
     linha("Chamadas resgatadas de texto", lambda r: f"{r.recovery_rate:.0%}")
-    linha("Ancoragem (objeto 4)", lambda r: str(r.grounding))
+    linha("Ancoragem (objeto 4)",
+          lambda r: f"{r.grounding} (n={len(r.grounding.values)})")
+    linha("Respostas que citam dado", lambda r: f"{len(r.grounding.values)}/{r.runs}")
     linha("Qualidade da resposta (objeto 5)", lambda r: str(r.answer_quality))
     linha("— reconhece a degradação", lambda r: str(r.degradation))
     linha("— cobre a pergunta raiz", lambda r: str(r.root_question))
@@ -256,6 +262,32 @@ def load_arm(run_dir: str | Path) -> tuple[list[Scores], list[Trace]]:
     return scores, list(Trace.read_jsonl(traces_path))
 
 
+COMPARABLE_FIELDS = ("seed", "model", "max_steps", "max_model_calls", "user_id")
+"""O que precisa ser idêntico para dois braços serem comparáveis.
+
+A arquitetura é a única variável que o experimento manipula. Qualquer outra
+diferença é variável de confusão, e a mais perigosa é a `seed`: ela decide a
+degradação que a API devolve, então braços com seeds diferentes enfrentam
+ambientes diferentes e a comparação deixa de significar alguma coisa.
+"""
+
+
+def comparability_warnings(configs: dict[str, dict]) -> list[str]:
+    """Campos que diferem entre braços e não deveriam.
+
+    Existe porque já aconteceu: uma bateria rodou com `--config` e a outra sem,
+    caindo no default, e os braços compararam sob seeds diferentes. O numero
+    saiu sem nenhum sinal de que o ambiente havia mudado.
+    """
+    avisos = []
+    for campo in COMPARABLE_FIELDS:
+        valores = {braco: cfg.get(campo) for braco, cfg in configs.items()}
+        if len(set(map(str, valores.values()))) > 1:
+            detalhe = ", ".join(f"{b}={v!r}" for b, v in sorted(valores.items()))
+            avisos.append(f"`{campo}` difere entre os braços: {detalhe}")
+    return avisos
+
+
 def render(relatorios: list[ArmReport]) -> str:
     """Documento markdown com as três tabelas."""
     partes = [
@@ -304,12 +336,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     relatorios = []
+    configs: dict[str, dict] = {}
     for d in args.dirs:
         scores, traces = load_arm(d)
         if not scores:
             print(f"(sem pontuações em {d})")
             continue
-        relatorios.append(aggregate(scores, traces))
+        relatorio = aggregate(scores, traces)
+        relatorios.append(relatorio)
+        if traces:
+            configs[relatorio.arm] = json.loads(traces[0].config.model_dump_json())
+
+    avisos = comparability_warnings(configs) if len(configs) > 1 else []
+    if avisos:
+        print("=" * 70)
+        print("COMPARACAO INVALIDA — os bracos nao rodaram sob as mesmas condicoes")
+        for a in avisos:
+            print(f"  - {a}")
+        print("A arquitetura deve ser a unica variavel. Refaca o braco divergente.")
+        print("=" * 70)
+        return 2
 
     if not relatorios:
         print("nenhum resultado encontrado")
