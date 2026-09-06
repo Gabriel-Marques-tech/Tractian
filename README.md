@@ -48,6 +48,10 @@ A variável manipulada é **a arquitetura**. Todo o resto — modelo, seed,
 ferramentas, permissões — é idêntico, porque qualquer diferença viraria variável
 de confusão.
 
+**O agente entregue é o braço A**, e essa escolha saiu do experimento: ele vence
+em toda métrica de qualidade, custa um terço das chamadas e é o único com zero
+ações indevidas. A seção de resultados traz os números.
+
 ## 3. Arquitetura
 
 ```
@@ -144,6 +148,25 @@ Bateria e relatório:
 api/.venv/bin/python -m agent.runner --config experiment.json --repetitions 5 --out-dir runs/braco-A
 api/.venv/bin/python -m agent.runner --arm B --repetitions 5 --out-dir runs/braco-B
 api/.venv/bin/python -m agent.report runs/braco-A runs/braco-B --out docs/resultados.md
+```
+
+A bateria é resumível: rodar de novo com o mesmo `--out-dir` continua de onde
+parou. Duas flags cobrem o que uma queda de ambiente deixa para trás:
+
+```bash
+# refaz as execucoes que terminaram em erro em vez de pula-las
+api/.venv/bin/python -m agent.runner --arm B --out-dir runs/braco-B --retry-failed
+
+# recomputa scores a partir dos traces, sem gastar chamada de modelo
+api/.venv/bin/python -m agent.runner --out-dir runs/braco-A --rescore-only
+```
+
+Inspetor de traces:
+
+```bash
+cd ui && npm install && npm run build && cd ..
+api/.venv/bin/python -m agent.export      # gera ui/public/data/runs.json
+make up-all                               # API em :8000, inspetor em :8001
 ```
 
 Testes:
@@ -248,8 +271,92 @@ agente ainda assim desistindo no primeiro passo.
 
 ## 7. Resultados
 
-> Bateria em execução. Preenchido a partir de `docs/resultados.md`, gerado por
-> `python -m agent.report`.
+170 execuções: 17 casos × 5 repetições × 2 braços, sob a mesma seed. Tabelas
+completas em [`docs/resultados.md`](docs/resultados.md), geradas por
+`python -m agent.report`.
+
+### A hipótese foi refutada
+
+| Métrica | Braço A | Braço B | |
+|---|---|---|---|
+| Trajetória | **0,09 ± 0,13** | 0,06 ± 0,12 | pior |
+| Recall de ferramentas | **0,10 ± 0,15** | 0,07 ± 0,15 | pior |
+| Precisão de ferramentas | **0,34 ± 0,47** | 0,19 ± 0,39 | pior |
+| Chamadas ao modelo por execução | **1,9** | 5,7 | 3× o custo |
+| Segundos por execução | **33** | 62 | 2× o tempo |
+| Instabilidade entre repetições | **0,004** | 0,013 | 3× menos estável |
+| Ações executadas sem o caso pedir | **0** | 4 | pior |
+| Alterações de config indevidas | **0** | 3 | pior |
+| Recusas do gate | 0 | 7 | |
+| Chamadas resgatadas de texto | **0%** | 27% | |
+
+A previsão era "melhor qualidade ao custo de mais chamadas". O custo confirmou;
+a qualidade não. O braço multi-agente é **pior em toda métrica de qualidade,
+três vezes mais caro, menos estável e menos seguro**.
+
+Por categoria, a derrota é consistente: contextualizar 0,14 contra 0,08 e
+investigar 0,09 contra 0,04. O braço B só empata em executar (0,07 contra
+0,08) — e empata agindo errado, como a seção de segurança mostra.
+
+### O mecanismo: imposto de protocolo
+
+Os **27% de chamadas resgatadas de texto** explicam a diferença, e são o achado
+central.
+
+Cada papel do braço B carrega o próprio prompt de sistema. Medido antes da
+bateria: acima de ~2000 tokens de prompt, `qwen2.5:1.5b` abandona a emissão
+estruturada de `tool_calls` e escreve a chamada em prosa. A pipeline paga esse
+imposto em **todo nó**, e o agente de nó único não paga nenhum.
+
+A conclusão não é que orquestrar seja ruim em tese. É que **num modelo de 1,5B
+o custo de contexto de cada papel come o ganho da especialização** — e sobra
+prejuízo. Sem o resgate no cliente, o braço B teria pontuado perto de zero e a
+comparação seria entre um agente e um agente quebrado.
+
+### A descoberta de segurança
+
+O braço B executou **quatro ações não pedidas pelo caso, três delas `PATCH` de
+configuração** — alterou estado de ativo sem o chamado pedir. O braço A: zero.
+
+Mais papéis deliberando produziu mais confiança para agir, não mais critério. O
+revisor adversarial e o decisor, que existiam justamente para conter conclusão
+apressada, não contiveram.
+
+**O gate no servidor MCP provou seu valor**: sete recusas. Se ele vivesse no
+prompt do agente, como no desenho original, essas sete teriam passado — e o
+braço B teria sete alterações indevidas em vez de três.
+
+### O que decorre disso
+
+**O agente entregue à TRACTIAN é o braço A.** A decisão não é preferência: ele
+vence em qualidade, custa um terço, é três vezes mais estável e é o único com
+zero ações indevidas.
+
+O braço B permanece no repositório porque é a evidência que sustenta essa
+escolha, não código morto. Um experimento que só guarda o vencedor não permite
+que ninguém verifique a comparação.
+
+### Onde o agente ainda falha
+
+Trajetória de 0,09 significa que o baseline acerta pouco. O inspetor mostra
+por quê, num caso que a métrica sozinha não explicaria — `TKT-CTX-01`:
+
+```
+1  GET /assets/asset_M101               conflito
+2  GET /companies/comp_forja_br/assets  completo
+3  GET /assets/asset_M101               conflito
+4  GET /companies/comp_forja_br/assets  completo
+...
+```
+
+Ao receber `mode=conflict`, o agente **entra em laço** entre dois endpoints em
+vez de buscar a fonte que resolveria o conflito, e termina devolvendo o JSON
+cru ao cliente. É o modo de falha mais frequente do braço A, e é o que uma
+próxima iteração deveria atacar primeiro.
+
+Ele também deixa de executar 35 ações que o gabarito exigia — não age quando
+deveria. O braço B erra na direção oposta: age quando não deveria. Nenhum dos
+dois acerta o critério.
 
 ## 8. Limitações
 
@@ -314,6 +421,9 @@ agent/
   runner.py       bateria resumível
   smoke.py        portão de decisão
   report.py       agregação e tabelas
+  export.py       JSON estático e tipos para o inspetor
+  server.py       serve o inspetor em :8001
+ui/               inspetor de traces (React + Vite)
 tests/            suíte do projeto
 docs/             spec, decisões e resultados
 ```
