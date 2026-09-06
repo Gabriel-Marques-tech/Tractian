@@ -36,4 +36,7 @@ Vocabulário canônico padrão, sem renomeações: `needs-triage`, `needs-info`,
 
 ### Domain docs
 
-Single-context: um `CONTEXT.md` na raiz + ADRs em `docs/adr/`. See `docs/agents/domain.md`.
+Convenção single-context: quando existirem, um `CONTEXT.md` na raiz e ADRs em
+`docs/adr/`. Nenhum dos dois foi criado — o domínio está documentado no
+`README.md` e em `docs/spec-agente-avaliacao.md`, e o vocabulário da API vem de
+`STUDENT-GUIDE.md` seção 6. See `docs/agents/domain.md`.
