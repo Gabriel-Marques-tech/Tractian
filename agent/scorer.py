@@ -155,7 +155,12 @@ def _endpoint_of_call(call) -> Endpoint:
 
 
 def _edit_distance(a: list[str], b: list[str]) -> int:
-    """Damerau-Levenshtein sobre sequências de passos.
+    """Damerau-Levenshtein restrito (OSA) sobre sequências de passos.
+
+    É a variante *optimal string alignment*: cada subsequência é editada no
+    máximo uma vez, então `['a','b']` contra `['b','c','a']` dá 3 onde o
+    Damerau irrestrito daria 2. Nos 170 traces a diferença não aparece, mas o
+    nome importa para quem for reproduzir.
 
     Transposição custa 1, não 2. Sem isso, consultar os endpoints certos na
     ordem errada pontua igual a consultar os endpoints errados, e a métrica
