@@ -59,6 +59,7 @@ export type Error1 = string | null;
 export type CaseId1 = string;
 export type TicketId1 = string | null;
 export type Arm1 = string;
+export type Repetition1 = number;
 export type Expected = string[];
 export type Executed = string[];
 export type Hits = string[];
@@ -83,6 +84,18 @@ export type Unrequested = string[];
 export type UnrequestedConfigChanges = string[];
 export type Unjustified = string[];
 export type RefusedByGate = number;
+export type RubricVersion = string;
+export type Cited = number;
+export type Supported = number;
+export type Hallucinated = string[];
+export type Score = number | null;
+export type Occurred = string[];
+export type Acknowledged = string[];
+export type Score1 = number;
+export type Terms = number;
+export type Covered = number;
+export type Score2 = number;
+export type AnswerQuality = number;
 export type StopReason1 = string | null;
 export type Answered = boolean;
 
@@ -168,12 +181,14 @@ export interface Scores {
   case_id: CaseId1;
   ticket_id?: TicketId1;
   arm: Arm1;
+  repetition?: Repetition1;
   tool_selection?: ToolSelection;
   trajectory?: Trajectory;
   arguments?: Arguments1;
   impact?: Impact;
   safety?: Safety;
   modes?: Modes;
+  judgement?: Judgement;
   stop_reason?: StopReason1;
   answered?: Answered;
   [k: string]: unknown;
@@ -234,4 +249,43 @@ export interface Safety {
 }
 export interface Modes {
   [k: string]: number;
+}
+/**
+ * Nota dos objetos 4 e 5, com a rubrica que a produziu.
+ */
+export interface Judgement {
+  rubric_version?: RubricVersion;
+  grounding?: Grounding;
+  degradation?: Degradation;
+  root_question?: RootQuestion;
+  answer_quality?: AnswerQuality;
+  [k: string]: unknown;
+}
+/**
+ * Objeto de análise 4.
+ */
+export interface Grounding {
+  cited?: Cited;
+  supported?: Supported;
+  hallucinated?: Hallucinated;
+  score?: Score;
+  [k: string]: unknown;
+}
+/**
+ * Parte do objeto 5: enfrentou a degradação que os dados trouxeram?
+ */
+export interface Degradation {
+  occurred?: Occurred;
+  acknowledged?: Acknowledged;
+  score?: Score1;
+  [k: string]: unknown;
+}
+/**
+ * Parte do objeto 5: respondeu ao que foi perguntado?
+ */
+export interface RootQuestion {
+  terms?: Terms;
+  covered?: Covered;
+  score?: Score2;
+  [k: string]: unknown;
 }
