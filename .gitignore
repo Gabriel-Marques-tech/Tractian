@@ -25,3 +25,4 @@ ui/node_modules/
 ui/dist/
 ui/public/data/runs.json
 ui/src/schema.json
+ui/*.tsbuildinfo
